@@ -124,13 +124,18 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
-def deliver(target: DeviceConfig, payload: bytes, description: str) -> int:
+def deliver(target: DeviceConfig, payloads, description: str) -> int:
+    if isinstance(payloads, (bytes, bytearray)):
+        payloads = [bytes(payloads)]
     try:
-        written = transport.send_packet(target.mac, target.channel, payload)
+        written = transport.send_packets(target.mac, target.channel, payloads)
     except transport.TransportError as failure:
         print(str(failure), file=sys.stderr)
         return 1
-    print(f"sent {description}, {written} bytes to {target.mac} channel {target.channel}")
+    print(
+        f"sent {description}, {len(payloads)} packet(s) and {written} bytes "
+        f"to {target.mac} channel {target.channel}"
+    )
     return 0
 
 
@@ -139,12 +144,46 @@ def cmd_send(args: argparse.Namespace) -> int:
     if target is None:
         return 1
     snapshot = snapshot_from_args(args)
+    label = f"session={int(round(args.session))} weekly={int(round(args.weekly))}"
+    if args.breathing:
+        frames = renderer.breathing_frames(snapshot)
+        if args.ascii:
+            print(renderer.ascii_art(frames[len(frames) // 2][0]))
+        return deliver(target, protocol.animation_packets(frames), label + " breathing")
     image = renderer.render(snapshot)
     if args.ascii:
         print(renderer.ascii_art(image))
-    payload = protocol.image_packet(image)
-    label = f"session={int(round(args.session))} weekly={int(round(args.weekly))}"
-    return deliver(target, payload, label)
+    return deliver(target, protocol.image_packet(image), label)
+
+
+def cmd_disconnect(args: argparse.Namespace) -> int:
+    target = resolve_target(args)
+    if target is None:
+        return 1
+    try:
+        print(transport.disconnect(target.mac))
+    except transport.TransportError as failure:
+        print(str(failure), file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_waiting(args: argparse.Namespace) -> int:
+    from . import attention
+
+    if args.clear:
+        for session in attention.waiting_sessions():
+            attention.clear_waiting(session)
+        print("cleared every waiting marker")
+        return 0
+    sessions = attention.waiting_sessions()
+    if not sessions:
+        print("no session is waiting for input")
+        return 0
+    print(f"{len(sessions)} session(s) waiting for input:")
+    for session in sessions:
+        print(f"  {session}")
+    return 0
 
 
 def cmd_send_raw(args: argparse.Namespace) -> int:
@@ -246,6 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="hours until the 7d window resets, drives the time marker on the weekly bar",
     )
     send.add_argument("--ascii", action="store_true", help="also print the frame as text")
+    send.add_argument(
+        "--breathing",
+        action="store_true",
+        help="send the looping breath the device plays while a session waits for input",
+    )
     add_target_arguments(send)
     send.set_defaults(func=cmd_send)
 
@@ -275,6 +319,17 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument("--verbose", action="store_true", help="log at debug level")
     add_target_arguments(daemon)
     daemon.set_defaults(func=cmd_daemon)
+
+    disconnect = subcommands.add_parser(
+        "disconnect",
+        help="drop the bluetooth link so macOS stops treating the device as a speaker",
+    )
+    add_target_arguments(disconnect)
+    disconnect.set_defaults(func=cmd_disconnect)
+
+    waiting = subcommands.add_parser("waiting", help="show which sessions wait for input")
+    waiting.add_argument("--clear", action="store_true", help="forget every waiting marker")
+    waiting.set_defaults(func=cmd_waiting)
 
     return parser
 

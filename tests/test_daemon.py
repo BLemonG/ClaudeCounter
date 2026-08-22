@@ -49,14 +49,14 @@ class FakeDisplay:
         self.sent = []
         self.failure = None
 
-    def __call__(self, mac: str, channel: int, payload: bytes) -> int:
+    def __call__(self, mac: str, channel: int, payloads) -> int:
         if self.failure is not None:
             raise self.failure
-        self.sent.append(payload)
-        return len(payload)
+        self.sent.append(list(payloads))
+        return sum(len(payload) for payload in payloads)
 
-    def decoded(self, index: int = -1):
-        raw = self.sent[index]
+    def decoded(self, index: int = -1, packet_index: int = 0):
+        raw = self.sent[index][packet_index]
         arguments = raw[4:-3]
         body = arguments[7:]
         palette_size = protocol.PALETTE_SIZE_ROLLOVER if body[3] == 0 else body[3]
@@ -81,7 +81,8 @@ def snapshot(session: float, weekly: float, stale: bool = False) -> UsageSnapsho
 
 
 def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
-          read_local_usage=lambda: None, resend_interval: float = FORCED_RESEND_SECONDS) -> Daemon:
+          read_local_usage=lambda: None, resend_interval: float = FORCED_RESEND_SECONDS,
+          a_session_is_waiting=lambda: False) -> Daemon:
     return Daemon(
         TARGET,
         quiet_logger(),
@@ -90,9 +91,14 @@ def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
         resend_interval=resend_interval,
         read_usage=read_usage,
         read_local_usage=read_local_usage,
-        send_packet=display,
+        a_session_is_waiting=a_session_is_waiting,
+        send_packets=display,
         clock=clock,
     )
+
+
+def still(image) -> list:
+    return [protocol.image_packet(image)]
 
 
 def a_good_reading_reaches_the_display() -> None:
@@ -101,7 +107,7 @@ def a_good_reading_reaches_the_display() -> None:
     daemon = build(lambda: snapshot(82.0, 41.0), display, clock)
     check(daemon.tick() is True, "a successful tick reports success")
     check(len(display.sent) == 1, "exactly one packet is sent")
-    check(display.sent[0] == protocol.image_packet(renderer.render(snapshot(82.0, 41.0))),
+    check(display.sent[0] == still(renderer.render(snapshot(82.0, 41.0))),
           "the packet matches the rendered snapshot")
     check(daemon.last_snapshot is not None, "the reading is remembered")
 
@@ -156,12 +162,12 @@ def a_failing_endpoint_keeps_the_last_value_and_marks_it_stale() -> None:
         or renderer.dimmed(renderer.SESSION_GREEN) in stale_pixels,
         "the stale frame carries a dimmed session colour",
     )
-    expected_stale = protocol.image_packet(renderer.render(snapshot(82.0, 41.0, stale=True)))
+    expected_stale = still(renderer.render(snapshot(82.0, 41.0, stale=True)))
     check(
         display.sent[-1] == expected_stale,
         "the stale frame is exactly the last known reading, only dimmed",
     )
-    zero_frame = protocol.image_packet(renderer.render(snapshot(0.0, 0.0, stale=True)))
+    zero_frame = still(renderer.render(snapshot(0.0, 0.0, stale=True)))
     check(display.sent[-1] != zero_frame, "the stale frame is not a zero percent frame")
 
     for _ in range(5):
@@ -185,10 +191,10 @@ def an_expired_token_never_shows_zero() -> None:
     daemon = build(read_usage, display, clock)
     check(daemon.tick() is True, "an expired token does not crash the loop")
 
-    unavailable = protocol.image_packet(renderer.render_unavailable())
+    unavailable = still(renderer.render_unavailable())
     check(display.sent == [unavailable], "the display states that it has no data")
 
-    zero_frame = protocol.image_packet(renderer.render(snapshot(0.0, 0.0)))
+    zero_frame = still(renderer.render(snapshot(0.0, 0.0)))
     check(zero_frame not in display.sent, "a zero percent frame is never sent")
     check(unavailable != zero_frame, "the unavailable frame is not a zero percent frame")
 
@@ -227,7 +233,7 @@ def an_expired_token_never_shows_zero() -> None:
     daemon.tick()
     check(len(display.sent) == 1, "the first real reading replaces the unavailable frame")
     check(
-        display.sent[-1] == protocol.image_packet(renderer.render(snapshot(82.0, 41.0))),
+        display.sent[-1] == still(renderer.render(snapshot(82.0, 41.0))),
         "and it is the real reading, not a placeholder",
     )
 
@@ -240,7 +246,7 @@ def a_display_failure_backs_off_and_recovers() -> None:
 
     check(daemon.tick() is False, "a transport failure reports failure")
     check(display.sent == [], "nothing is recorded as sent")
-    check(daemon.last_payload is None, "a failed send is not remembered as delivered")
+    check(daemon.last_payloads is None, "a failed send is not remembered as delivered")
 
     delays = []
     original_wait = daemon.wait
@@ -293,7 +299,7 @@ def the_endpoint_is_not_asked_more_often_than_the_fetch_interval() -> None:
     daemon.tick()
     check(len(calls) == 2, "the next request happens once the interval has elapsed")
     check(
-        display.sent[0] == protocol.image_packet(renderer.render(snapshot(30.0, 20.0))),
+        display.sent[0] == still(renderer.render(snapshot(30.0, 20.0))),
         "the held snapshot is still what gets drawn between requests",
     )
 
@@ -324,11 +330,11 @@ def a_rate_limited_endpoint_is_left_alone_for_the_announced_time() -> None:
     daemon.tick()
     check(len(calls) == 3, "requests resume after the announced pause has passed")
     check(
-        display.sent[-1] == protocol.image_packet(renderer.render(snapshot(64.0, 33.0, stale=True))),
+        display.sent[-1] == still(renderer.render(snapshot(64.0, 33.0, stale=True))),
         "the last known value stays on the display, marked stale",
     )
     check(
-        display.sent[-1] != protocol.image_packet(renderer.render(snapshot(0.0, 0.0))),
+        display.sent[-1] != still(renderer.render(snapshot(0.0, 0.0))),
         "a rate limited endpoint never turns the display into a zero reading",
     )
 
@@ -357,11 +363,11 @@ def the_local_file_keeps_the_minute_beat_while_the_api_is_blocked() -> None:
         daemon.tick()
     check(len(api_calls) == 1, "no further api call happens during the pause")
     check(
-        display.sent[-1] == protocol.image_packet(renderer.render(snapshot(58.0, 12.0))),
+        display.sent[-1] == still(renderer.render(snapshot(58.0, 12.0))),
         "each minute the freshly written local value reaches the display",
     )
     check(
-        display.sent[-1] != protocol.image_packet(renderer.render(snapshot(58.0, 12.0, stale=True))),
+        display.sent[-1] != still(renderer.render(snapshot(58.0, 12.0, stale=True))),
         "a local reading counts as current, not as stale",
     )
 
@@ -379,7 +385,7 @@ def a_rolled_over_local_file_is_not_trusted() -> None:
     clock.advance(60.0)
     daemon.tick()
     check(
-        display.sent[-1] == protocol.image_packet(renderer.render(snapshot(70.0, 30.0))),
+        display.sent[-1] == still(renderer.render(snapshot(70.0, 30.0))),
         "a local file whose window has rolled over is ignored in favour of the endpoint",
     )
 
@@ -403,6 +409,129 @@ def the_display_is_refreshed_every_minute_by_default() -> None:
     check(FORCED_RESEND_SECONDS == 60.0, "the default resend interval is one minute")
 
 
+def a_waiting_session_makes_the_background_breathe() -> None:
+    print("breathing while a session waits")
+    waiting = {"now": False}
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: snapshot(63.0, 29.0), display, clock,
+                   a_session_is_waiting=lambda: waiting["now"])
+
+    daemon.tick()
+    quiet = display.sent[-1]
+    check(len(quiet) == 1, "with nobody waiting a single still packet is sent")
+    check(quiet[0][3] == protocol.COMMAND_SET_IMAGE, "and it is the still image command 0x44")
+
+    waiting["now"] = True
+    clock.advance(60.0)
+    daemon.tick()
+    breathing = display.sent[-1]
+    check(len(breathing) > 1, f"a waiting session sends a {len(breathing)} packet animation")
+    check(
+        all(payload[3] == protocol.COMMAND_SET_ANIMATION_FRAME for payload in breathing),
+        "every animation packet uses command 0x49",
+    )
+    check(breathing != quiet, "the display is told something different while a session waits")
+
+    orange = renderer.ATTENTION_BACKGROUND
+    peak = renderer.render(snapshot(63.0, 29.0), None, 1.0)
+    check(orange in peak.getdata(), "the fully lit breath frame really carries the orange")
+    check(orange not in renderer.render(snapshot(63.0, 29.0)).getdata(),
+          "the quiet frame carries no orange at all")
+
+    waiting["now"] = False
+    clock.advance(60.0)
+    daemon.tick()
+    check(display.sent[-1] == quiet, "answering the session puts the plain frame back")
+
+
+def the_breath_keeps_the_reading_readable() -> None:
+    print("breathing frame content")
+    frames = renderer.breathing_frames(snapshot(63.0, 29.0), "2026-08-22T15:00:00+00:00")
+    levels = renderer.breath_levels()
+    check(len(frames) == len(levels), "one frame per breath level")
+    check(min(levels) == 0.0 and max(levels) == 1.0,
+          "the breath runs from fully dark to fully lit")
+    check(levels[0] == 0.0 and levels[-1] > 0.0,
+          "the cycle starts dark so the loop joins up smoothly")
+
+    for step, (image, milliseconds) in enumerate(frames):
+        pixels = image.load()
+        check(milliseconds == renderer.BREATH_FRAME_MILLISECONDS,
+              f"frame {step}: declares the frame time")
+        check(pixels[7, 0] != renderer.attention_background(levels[step]),
+              f"frame {step}: the session ring is not painted over")
+        check(pixels[0, renderer.WEEKLY_ROW] != renderer.attention_background(levels[step]),
+              f"frame {step}: the weekly bar is not painted over")
+        digits = [
+            pixels[x, y]
+            for y in range(3, 12)
+            for x in range(2, 14)
+            if pixels[x, y] == renderer.LABEL
+        ]
+        check(len(digits) > 0, f"frame {step}: the percentage stays readable on top")
+
+
+def a_waiting_session_breathes_even_without_usage_data() -> None:
+    print("breathing without data")
+
+    def read_usage():
+        raise usage_source.ExpiredCredentials("the token expired, sign in again")
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(read_usage, display, clock, a_session_is_waiting=lambda: True)
+    daemon.tick()
+    sent = display.sent[-1]
+    check(len(sent) > 1, "the unavailable frame breathes as an animation too")
+    check(
+        all(payload[3] == protocol.COMMAND_SET_ANIMATION_FRAME for payload in sent),
+        "and it uses the animation command",
+    )
+    check(sent != still(renderer.render(snapshot(0.0, 0.0))),
+          "a breathing unavailable frame is still never a zero reading")
+
+
+def a_broken_marker_directory_never_stops_the_counter() -> None:
+    print("attention failures")
+
+    def explode():
+        raise OSError("the marker directory is unreadable")
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: snapshot(63.0, 29.0), display, clock, a_session_is_waiting=explode)
+    check(daemon.tick() is True, "a failing waiting check does not break the tick")
+    check(display.sent[-1] == still(renderer.render(snapshot(63.0, 29.0))),
+          "the counter simply falls back to the plain frame")
+
+
+def the_loop_reacts_to_a_waiting_session_within_seconds() -> None:
+    print("attention latency")
+    waiting = {"now": False}
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: snapshot(63.0, 29.0), display, clock,
+                   a_session_is_waiting=lambda: waiting["now"])
+
+    slept = []
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        clock.advance(seconds)
+        if len(slept) == 3:
+            waiting["now"] = True
+        return False
+
+    daemon.stop_requested.wait = fake_sleep
+    daemon.wait(60.0)
+    check(
+        max(slept) <= daemon.attention_poll_interval,
+        f"the loop never sleeps longer than {daemon.attention_poll_interval}s in one go",
+    )
+    check(
+        sum(slept) < 60.0,
+        f"a session that starts waiting cuts the minute short after {sum(slept)}s",
+    )
+    check(len(slept) == 3, "the wait returns on the first check that sees the change")
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
@@ -415,6 +544,11 @@ def main() -> int:
     a_rate_limited_endpoint_is_left_alone_for_the_announced_time()
     the_local_file_keeps_the_minute_beat_while_the_api_is_blocked()
     a_rolled_over_local_file_is_not_trusted()
+    a_waiting_session_makes_the_background_breathe()
+    the_breath_keeps_the_reading_readable()
+    a_waiting_session_breathes_even_without_usage_data()
+    a_broken_marker_directory_never_stops_the_counter()
+    the_loop_reacts_to_a_waiting_session_within_seconds()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

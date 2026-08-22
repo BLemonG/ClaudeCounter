@@ -131,35 +131,46 @@ func commandScan(_ seconds: Int) {
 }
 
 final class RFCOMMSender: NSObject, IOBluetoothRFCOMMChannelDelegate {
-    private let payload: [UInt8]
+    private let packets: [[UInt8]]
     private let listenSeconds: TimeInterval
     private var openStatus: IOReturn?
     private var writeStatus: IOReturn?
     private var bytesWritten = 0
     private var channelClosed = false
 
-    init(payload: [UInt8], listenSeconds: TimeInterval) {
-        self.payload = payload
+    init(packets: [[UInt8]], listenSeconds: TimeInterval) {
+        self.packets = packets
         self.listenSeconds = listenSeconds
     }
 
     func rfcommChannelOpenComplete(_ rfcommChannel: IOBluetoothRFCOMMChannel!, status error: IOReturn) {
         openStatus = error
         guard error == kIOReturnSuccess else { return }
-        note("channel open, mtu \(rfcommChannel.getMTU())")
-        guard !payload.isEmpty else {
+        let mtu = rfcommChannel.getMTU()
+        note("channel open, mtu \(mtu)")
+        guard !packets.isEmpty else {
             writeStatus = kIOReturnSuccess
             return
         }
-        var buffer = payload
-        let length = buffer.count
-        let status = buffer.withUnsafeMutableBytes { raw -> IOReturn in
-            return rfcommChannel.writeSync(raw.baseAddress, length: UInt16(length))
+        for packet in packets {
+            guard !packet.isEmpty else { continue }
+            if packet.count > Int(mtu) {
+                note("packet of \(packet.count) bytes exceeds the channel mtu of \(mtu)")
+                writeStatus = kIOReturnMessageTooLarge
+                return
+            }
+            var buffer = packet
+            let length = buffer.count
+            let status = buffer.withUnsafeMutableBytes { raw -> IOReturn in
+                return rfcommChannel.writeSync(raw.baseAddress, length: UInt16(length))
+            }
+            if status != kIOReturnSuccess {
+                writeStatus = status
+                return
+            }
+            bytesWritten += length
         }
-        writeStatus = status
-        if status == kIOReturnSuccess {
-            bytesWritten = length
-        }
+        writeStatus = kIOReturnSuccess
     }
 
     func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel!, data dataPointer: UnsafeMutableRawPointer!, length: Int) {
@@ -225,14 +236,10 @@ final class RFCOMMSender: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 }
 
-func readHexBytes(path: String) -> [UInt8] {
-    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
-        note("could not read \(path)")
-        finish(66)
-    }
-    let digits = text.filter { $0.isHexDigit }
+func decodeHexLine(_ line: Substring, path: String) -> [UInt8] {
+    let digits = line.filter { $0.isHexDigit }
     guard digits.count % 2 == 0, !digits.isEmpty else {
-        note("payload file must contain an even, non-zero number of hex digits")
+        note("every packet line must hold an even, non-zero number of hex digits")
         finish(65)
     }
     var bytes: [UInt8] = []
@@ -249,14 +256,47 @@ func readHexBytes(path: String) -> [UInt8] {
     return bytes
 }
 
+func readHexPackets(path: String) -> [[UInt8]] {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+        note("could not read \(path)")
+        finish(66)
+    }
+    let lines = text.split(whereSeparator: { $0.isNewline })
+    let packets = lines.filter { $0.contains(where: { $0.isHexDigit }) }
+        .map { decodeHexLine($0, path: path) }
+    guard !packets.isEmpty else {
+        note("payload file must contain at least one packet")
+        finish(65)
+    }
+    return packets
+}
+
 func commandSend(_ address: String, _ channelID: Int, _ path: String, _ listenSeconds: Double) {
-    let payload = readHexBytes(path: path)
-    print("sending \(payload.count) bytes to \(address) channel \(channelID)")
-    let sender = RFCOMMSender(payload: payload, listenSeconds: listenSeconds)
+    let packets = readHexPackets(path: path)
+    let total = packets.reduce(0) { $0 + $1.count }
+    print("sending \(packets.count) packet(s), \(total) bytes to \(address) channel \(channelID)")
+    let sender = RFCOMMSender(packets: packets, listenSeconds: listenSeconds)
     let code = sender.run(address: address, channelID: BluetoothRFCOMMChannelID(channelID), openTimeout: 20.0)
     if code != 0 {
         finish(code)
     }
+}
+
+func commandDisconnect(_ address: String) {
+    guard let device = IOBluetoothDevice(addressString: address) else {
+        note("could not resolve address \(address)")
+        finish(3)
+    }
+    guard device.isConnected() else {
+        print("\(address) is already disconnected")
+        return
+    }
+    let status = device.closeConnection()
+    if status != kIOReturnSuccess {
+        note("closeConnection failed, status \(status)")
+        finish(9)
+    }
+    print("\(address) disconnected")
 }
 
 atexit {
@@ -266,7 +306,7 @@ atexit {
 
 let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
-    note("usage: bt_probe list | sdp <ADDRESS> | scan [SECONDS] | send <ADDRESS> <CHANNEL> <HEXFILE> [LISTEN_SECONDS]")
+    note("usage: bt_probe list | sdp <ADDRESS> | scan [SECONDS] | send <ADDRESS> <CHANNEL> <HEXFILE> [LISTEN_SECONDS] | disconnect <ADDRESS>")
     finish(64)
 }
 
@@ -290,6 +330,12 @@ case "send":
     }
     let listenSeconds = arguments.count >= 6 ? (Double(arguments[5]) ?? 0.0) : 0.0
     commandSend(arguments[2], channelID, arguments[4], listenSeconds)
+case "disconnect":
+    guard arguments.count >= 3 else {
+        note("usage: bt_probe disconnect <ADDRESS>")
+        finish(64)
+    }
+    commandDisconnect(arguments[2])
 case "scan":
     let seconds = arguments.count >= 3 ? (Int(arguments[2]) ?? 12) : 12
     commandScan(seconds)

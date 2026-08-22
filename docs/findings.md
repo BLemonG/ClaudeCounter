@@ -855,3 +855,101 @@ Am Gerät verifiziert:
 20:05:58 session 14.0% weekly 51.0%, 135 bytes sent
 20:06:59 session 14.0% weekly 51.0%, 135 bytes sent
 ```
+
+## 18. Atmender Hintergrund, wenn eine Sitzung auf Eingabe wartet
+
+### 18.1 Warum eine Geräte-Animation und kein Daemon-Flackern
+
+Ein Sendevorgang dauert gemessen 0,60–0,74 s, davon fast alles Verbindungsaufbau.
+Vom Mac aus getriebenes Atmen käme auf höchstens ~1,4 Bilder pro Sekunde — zu wenig.
+Die Timebox spielt Animationen selbst ab, endlos in Schleife. Der Mac schickt die
+Schleife einmal, das Gerät übernimmt.
+
+### 18.2 Beleg für das Animationsformat
+
+Kommando `0x49`. Dreifach belegt, ohne eine einzige geratene Byte-Folge:
+
+| Quelle | Fundstelle |
+| --- | --- |
+| `node-divoom-timebox-evo/PROTOCOL.md` | Abschnitt „Animations", Zeilen 324–357 |
+| `node-divoom-timebox-evo/src/drawing/jimp_overloads.ts` | `_animAsDivoomMessages`, `DivoomJimpAnim.asDivoomMessage` |
+| `hass-divoom/custom_components/divoom/devices/divoom.py` | `"set animation frame": 0x49`, `make_frame`, `make_framepart`, `show_image` |
+
+Aufbau:
+
+```
+01 LLLL 49 TTTT NN <chunk> CCCC 02
+         |  |    |
+         |  |    +-- Paketnummer, beginnt bei 0, ein Byte
+         |  +------- Gesamtlänge aller Frames zusammen, little endian
+         +---------- Kommando
+
+Frame-Strom = alle Frames aneinandergehängt, jeder als
+AA LLLL TTTT RR NN COLOR_DATA PIXEL_DATA
+   |    |    |  +-- Anzahl Farben, 0 bei 256
+   |    |    +----- Palette zurücksetzen, 00
+   |    +---------- Anzeigedauer in ms, little endian
+   +--------------- Länge des Frames ab AA, also Rumpf + 3
+```
+
+Der Frame-Rumpf ist bis aufs Byte derselbe wie beim Standbild `0x44`; unser
+`encode_frame` erzeugte ihn bereits richtig, nur das Dauer-Feld war bisher immer
+`00 00`. Der Strom wird alle **200 Bytes** zerteilt — `chunksize = 200` in
+`hass-divoom/devices/timebox.py`, `match(/.{1,400}/g)` über Hex-Zeichen in der
+node-Bibliothek, identisch.
+
+### 18.3 Am Gerät verifiziert
+
+Zwölf Frames à 320 ms → 1568 Bytes → 8 Pakete, jedes 210 Bytes und damit weit
+unter der gemessenen MTU von 666. Gesendet in **0,655 s** — genauso schnell wie
+ein einzelnes Standbild, weil alle acht Schreibvorgänge über dieselbe offene
+Verbindung laufen. Dafür schreibt der Swift-Helfer jetzt mehrere Pakete pro
+Verbindung statt eines einzigen; die Hex-Datei enthält ein Paket pro Zeile.
+
+### 18.4 Wie „wartet auf Eingabe" erkannt wird
+
+Nicht über macOS-Benachrichtigungen — die sind unzuverlässig. Stattdessen Hooks
+von Claude Code, die eine Markierungsdatei je Sitzung anlegen und wieder löschen:
+
+| Ereignis | Wirkung |
+| --- | --- |
+| `Stop` | Antwort fertig, wartet auf Eingabe → Markierung setzen |
+| `Notification` | Rückfrage oder Freigabe nötig → Markierung setzen |
+| `UserPromptSubmit` | Eingabe kam → Markierung löschen |
+| `SessionStart`, `SessionEnd` | Markierung löschen |
+
+Eine Markierung je Sitzung, deshalb hört das Atmen erst auf, wenn **jede**
+wartende Sitzung beantwortet ist. Abgestürzte Sitzungen hinterlassen eine
+Leiche; Markierungen älter als `MARKER_MAX_AGE_SECONDS` (4 h) zählen nicht mehr
+und werden beim Lesen entfernt. Sitzungskennungen werden auf
+`[A-Za-z0-9._-]` reduziert und an Punkten und Bindestrichen beschnitten, damit
+kein `..` als Verzeichnisname übrig bleibt.
+
+Der Hook schluckt jeden Fehler und liefert immer 0. Er darf eine Sitzung unter
+keinen Umständen blockieren.
+
+### 18.5 Reaktionszeit
+
+Der Daemon zeichnet weiter im Minutentakt, prüft die Markierungen aber alle
+5 Sekunden und bricht das Warten ab, sobald sich der Zustand ändert. Live
+gemessen: Markierung gesetzt → Animation nach ~5 s auf dem Gerät; Markierung
+gelöscht → Standbild nach ~11 s zurück.
+
+### 18.6 Was orange wird
+
+Nur die Innenfläche hinter den Ziffern, Spalten 1–14 und Zeilen 1–13. Der
+Sitzungsring, der Zeitpunkt-Marker und der Wochenbalken bleiben unangetastet,
+die Ziffern werden zuletzt darübergezeichnet und bleiben weiß lesbar. Die Helligkeit
+folgt `(1 - cos(2π · i / 12)) / 2`, beginnt also dunkel und schließt sich glatt
+zur Schleife.
+
+## 19. Die Timebox als Audio-Gerät unter macOS
+
+Die Timebox meldet sich unter derselben Adresse, die wir für die Daten nutzen,
+mit den Profilen `HFP AVRCP A2DP` an — macOS sieht ein Headset. In der
+Kommandotabelle beider Referenzen gibt es nichts, um das gerätseitig
+abzuschalten.
+
+Gemessen: `IOBluetoothDevice.closeConnection()` meldet Erfolg, aber die Timebox
+baut die Verbindung binnen Sekunden selbst wieder auf — auch bei angehaltenem
+Daemon. Ein Trennen im Bluetooth-Menü hält also nicht.

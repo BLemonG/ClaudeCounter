@@ -232,6 +232,91 @@ def rendered_frames_produce_valid_packets() -> None:
         check(len(raw) < 1024, f"{label}: packet is {len(raw)} bytes")
 
 
+def animation_packets_follow_the_documented_layout() -> None:
+    print("animation packets")
+    snapshot = UsageSnapshot(
+        session_pct=63.0,
+        session_resets_at=None,
+        weekly_pct=29.0,
+        weekly_resets_at=None,
+        fetched_at="2026-08-22T15:00:00+00:00",
+        stale=False,
+    )
+    frames = renderer.breathing_frames(snapshot, "2026-08-22T15:00:00+00:00")
+    stream = protocol.animation_stream(frames)
+    packets = protocol.animation_packets(frames)
+
+    check(len(frames) == renderer.BREATH_FRAME_COUNT, "one packet stream carries the whole breath")
+    check(len(packets) >= 2, f"the breath needs {len(packets)} packets, so chunking is exercised")
+
+    rebuilt = b""
+    for number, raw in enumerate(packets):
+        check(raw[0] == protocol.START_OF_PACKET, f"packet {number}: starts with 0x01")
+        check(raw[-1] == protocol.END_OF_PACKET, f"packet {number}: ends with 0x02")
+        payload = raw[1:-3]
+        check(
+            raw[-3:-1] == protocol.checksum(payload),
+            f"packet {number}: the checksum covers length, command and arguments",
+        )
+        declared_length = payload[0] | (payload[1] << 8)
+        arguments = payload[3:]
+        check(payload[2] == protocol.COMMAND_SET_ANIMATION_FRAME,
+              f"packet {number}: uses command 0x49")
+        check(declared_length == len(arguments) + 3,
+              f"packet {number}: the declared length matches the arguments")
+        total = arguments[0] | (arguments[1] << 8)
+        check(total == len(stream),
+              f"packet {number}: announces the full stream length of {len(stream)} bytes")
+        check(arguments[2] == number, f"packet {number}: carries its own packet number")
+        chunk = arguments[3:]
+        check(
+            len(chunk) <= protocol.ANIMATION_CHUNK_BYTES,
+            f"packet {number}: chunk of {len(chunk)} bytes stays within the documented 200",
+        )
+        check(len(raw) < 666, f"packet {number}: {len(raw)} bytes fits the measured channel mtu")
+        rebuilt += chunk
+
+    check(rebuilt == stream, "concatenating every chunk reproduces the frame stream exactly")
+
+    offset = 0
+    seen = 0
+    while offset < len(stream):
+        check(stream[offset] == protocol.FRAME_MARKER, f"frame {seen}: starts with 0xAA")
+        frame_length = stream[offset + 1] | (stream[offset + 2] << 8)
+        body = stream[offset + 3 : offset + frame_length]
+        check(frame_length == len(body) + 3, f"frame {seen}: FLEN counts the body plus three")
+        duration = body[0] | (body[1] << 8)
+        check(
+            duration == renderer.BREATH_FRAME_MILLISECONDS,
+            f"frame {seen}: declares {duration}ms, the frame time of the breath",
+        )
+        check(body[2] == 0x00, f"frame {seen}: resets the palette")
+        offset += frame_length
+        seen += 1
+    check(seen == renderer.BREATH_FRAME_COUNT,
+          f"the stream holds exactly {renderer.BREATH_FRAME_COUNT} frames")
+
+
+def a_still_frame_and_an_animation_never_collide() -> None:
+    print("animation versus still")
+    snapshot = UsageSnapshot(
+        session_pct=63.0,
+        session_resets_at=None,
+        weekly_pct=29.0,
+        weekly_resets_at=None,
+        fetched_at="2026-08-22T15:00:00+00:00",
+        stale=False,
+    )
+    still = protocol.image_packet(renderer.render(snapshot, "2026-08-22T15:00:00+00:00"))
+    breathing = protocol.animation_packets(
+        renderer.breathing_frames(snapshot, "2026-08-22T15:00:00+00:00")
+    )
+    check(still[3] == protocol.COMMAND_SET_IMAGE, "the still frame uses 0x44")
+    check(breathing[0][3] == protocol.COMMAND_SET_ANIMATION_FRAME, "the breath uses 0x49")
+    check(still not in breathing, "no animation packet is accidentally the still packet")
+    check(protocol.animation_packets([]) == [], "an empty animation produces no packets")
+
+
 def main() -> int:
     brightness_matches_the_golden()
     reference_frame_re_encodes_byte_for_byte("hass-divoom Timebox smiley16", SMILEY_GOLDEN)
@@ -241,6 +326,8 @@ def main() -> int:
     bit_width_follows_the_palette()
     packing_round_trips_for_every_width()
     rendered_frames_produce_valid_packets()
+    animation_packets_follow_the_documented_layout()
+    a_still_frame_and_an_animation_never_collide()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

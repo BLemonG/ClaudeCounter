@@ -5,8 +5,9 @@ import logging.handlers
 import signal
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
+from . import attention
 from . import protocol
 from . import render as renderer
 from . import transport
@@ -19,6 +20,7 @@ USAGE_FETCH_INTERVAL_SECONDS = 300.0
 INITIAL_BACKOFF_SECONDS = 5.0
 MAXIMUM_BACKOFF_SECONDS = 300.0
 FORCED_RESEND_SECONDS = 60.0
+ATTENTION_POLL_SECONDS = 5.0
 FAILURE_HEARTBEAT_EVERY = 60
 
 LOG_DIRECTORY = Path.home() / "Library" / "Logs" / "ClaudeCounter"
@@ -57,9 +59,11 @@ class Daemon:
         poll_interval: float = POLL_INTERVAL_SECONDS,
         usage_fetch_interval: float = USAGE_FETCH_INTERVAL_SECONDS,
         resend_interval: float = FORCED_RESEND_SECONDS,
+        attention_poll_interval: float = ATTENTION_POLL_SECONDS,
         read_usage=usage_source.read_usage,
         read_local_usage=usage_source.read_local_usage,
-        send_packet=transport.send_packet,
+        a_session_is_waiting=attention.a_session_is_waiting,
+        send_packets=transport.send_packets,
         clock=None,
     ) -> None:
         self.target = target
@@ -67,13 +71,15 @@ class Daemon:
         self.poll_interval = poll_interval
         self.usage_fetch_interval = usage_fetch_interval
         self.resend_interval = resend_interval
+        self.attention_poll_interval = attention_poll_interval
         self.read_usage = read_usage
         self.read_local_usage = read_local_usage
-        self.send_packet = send_packet
+        self.a_session_is_waiting = a_session_is_waiting
+        self.send_packets = send_packets
         self.clock = clock or __import__("time").monotonic
         self.stop_requested = threading.Event()
         self.last_snapshot: Optional[UsageSnapshot] = None
-        self.last_payload: Optional[bytes] = None
+        self.last_payloads: Optional[List[bytes]] = None
         self.last_sent_at: Optional[float] = None
         self.consecutive_usage_failures = 0
         self.next_usage_fetch_at: Optional[float] = None
@@ -148,53 +154,81 @@ class Daemon:
         self.last_snapshot = snapshot
         return snapshot
 
-    def payload_is_due(self, payload: bytes) -> bool:
-        if payload != self.last_payload:
+    def payloads_are_due(self, payloads: List[bytes]) -> bool:
+        if payloads != self.last_payloads:
             return True
         if self.last_sent_at is None:
             return True
         return (self.clock() - self.last_sent_at) >= self.resend_interval
 
+    def attention_is_wanted(self) -> bool:
+        try:
+            return bool(self.a_session_is_waiting())
+        except Exception:
+            return False
+
+    def frames_to_send(self, snapshot: Optional[UsageSnapshot], waiting: bool):
+        if snapshot is None:
+            description = "no usage data, showing the unavailable frame"
+            if waiting:
+                return protocol.animation_packets(
+                    renderer.breathing_unavailable_frames()
+                ), description + ", breathing"
+            return [protocol.image_packet(renderer.render_unavailable())], description
+        description = "session %.1f%% weekly %.1f%%%s" % (
+            snapshot.session_pct,
+            snapshot.weekly_pct,
+            " (stale)" if snapshot.stale else "",
+        )
+        if waiting:
+            return protocol.animation_packets(
+                renderer.breathing_frames(snapshot)
+            ), description + ", a session is waiting for input"
+        return [protocol.image_packet(renderer.render(snapshot))], description
+
     def tick(self) -> bool:
         snapshot = self.current_snapshot()
-        if snapshot is None:
-            image = renderer.render_unavailable()
-            description = "no usage data, showing the unavailable frame"
-        else:
-            image = renderer.render(snapshot)
-            description = "session %.1f%% weekly %.1f%%%s" % (
-                snapshot.session_pct,
-                snapshot.weekly_pct,
-                " (stale)" if snapshot.stale else "",
-            )
+        waiting = self.attention_is_wanted()
+        payloads, description = self.frames_to_send(snapshot, waiting)
 
-        payload = protocol.image_packet(image)
-        if not self.payload_is_due(payload):
+        if not self.payloads_are_due(payloads):
             self.logger.debug("frame unchanged, nothing to send")
             return True
 
         try:
-            written = self.send_packet(self.target.mac, self.target.channel, payload)
+            written = self.send_packets(self.target.mac, self.target.channel, payloads)
         except transport.TransportError as failure:
             self.logger.warning("could not reach the display: %s", failure)
             return False
 
-        self.last_payload = payload
+        self.last_payloads = payloads
         self.last_sent_at = self.clock()
-        self.logger.info("%s, %d bytes sent", description, written)
+        self.logger.info(
+            "%s, %d packet(s) and %d bytes sent", description, len(payloads), written
+        )
         return True
 
     def wait(self, seconds: float) -> None:
-        self.stop_requested.wait(seconds)
+        known = self.attention_is_wanted()
+        deadline = self.clock() + seconds
+        while not self.stop_requested.is_set():
+            remaining = deadline - self.clock()
+            if remaining <= 0.0:
+                return
+            self.stop_requested.wait(min(self.attention_poll_interval, remaining))
+            if self.attention_is_wanted() != known:
+                return
 
     def run(self) -> int:
         self.logger.info(
             "starting, target %s channel %d, redrawing every %.0fs, "
-            "asking the usage endpoint at most every %.0fs",
+            "asking the usage endpoint at most every %.0fs, "
+            "watching for waiting sessions every %.0fs",
             self.target.mac,
             self.target.channel,
             self.poll_interval,
             self.usage_fetch_interval,
+            self.attention_poll_interval,
         )
         backoff = INITIAL_BACKOFF_SECONDS
         while not self.stop_requested.is_set():

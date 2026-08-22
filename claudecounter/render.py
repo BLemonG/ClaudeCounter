@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -32,6 +33,9 @@ WEEKLY_TRACK: Color = (38, 18, 68)
 TIME_MARKER: Color = (0, 190, 255)
 UNAVAILABLE_LABEL: Color = (120, 120, 120)
 UNAVAILABLE_TEXT = "--"
+ATTENTION_BACKGROUND: Color = (255, 100, 0)
+BREATH_FRAME_COUNT = 12
+BREATH_FRAME_MILLISECONDS = 320
 
 SESSION_GREEN: Color = (0, 220, 80)
 SESSION_YELLOW: Color = (245, 200, 0)
@@ -185,6 +189,21 @@ def clamp_percent(value: float) -> float:
     return max(0.0, min(100.0, float(value)))
 
 
+def attention_background(level: float) -> Color:
+    scale = max(0.0, min(1.0, float(level)))
+    return (
+        int(round(ATTENTION_BACKGROUND[0] * scale)),
+        int(round(ATTENTION_BACKGROUND[1] * scale)),
+        int(round(ATTENTION_BACKGROUND[2] * scale)),
+    )
+
+
+def breath_levels(count: int = BREATH_FRAME_COUNT) -> List[float]:
+    return [
+        (1.0 - math.cos(2.0 * math.pi * step / count)) / 2.0 for step in range(count)
+    ]
+
+
 def dimmed(color: Color) -> Color:
     return (
         int(round(color[0] * STALE_BRIGHTNESS)),
@@ -286,6 +305,12 @@ def draw_time_marker(pixels, fraction: float, stale: bool) -> None:
     pixels[time_marker_position(fraction)] = color
 
 
+def draw_interior_background(pixels, color: Color) -> None:
+    for y in range(INTERIOR_FIRST_ROW, INTERIOR_LAST_ROW + 1):
+        for x in range(INTERIOR_FIRST_COLUMN, INTERIOR_LAST_COLUMN + 1):
+            pixels[x, y] = color
+
+
 def draw_text(pixels, text: str, color: Color) -> None:
     origin_x = (SIZE - label_width(text)) // 2
     origin_y = INTERIOR_FIRST_ROW + (
@@ -329,12 +354,15 @@ def draw_weekly_marker(pixels, fraction: float, stale: bool) -> None:
     pixels[weekly_marker_column(fraction), WEEKLY_ROW] = color
 
 
-def render(snapshot: UsageSnapshot, now: Optional[str] = None) -> Image.Image:
+def render(
+    snapshot: UsageSnapshot, now: Optional[str] = None, attention: float = 0.0
+) -> Image.Image:
     reference = now or utc_now_iso()
     session = clamp_percent(snapshot.session_pct)
     weekly = clamp_percent(snapshot.weekly_pct)
     image = Image.new("RGB", (SIZE, SIZE), BACKGROUND)
     pixels = image.load()
+    draw_interior_background(pixels, attention_background(attention))
     draw_session_ring(pixels, session, snapshot.stale)
     elapsed = session_elapsed_fraction(snapshot, reference)
     if elapsed is not None:
@@ -347,15 +375,33 @@ def render(snapshot: UsageSnapshot, now: Optional[str] = None) -> Image.Image:
     return image
 
 
-def render_unavailable() -> Image.Image:
+def render_unavailable(attention: float = 0.0) -> Image.Image:
     image = Image.new("RGB", (SIZE, SIZE), BACKGROUND)
     pixels = image.load()
+    draw_interior_background(pixels, attention_background(attention))
     for x, y in ring_positions():
         pixels[x, y] = RING_TRACK
     for x in range(SIZE):
         pixels[x, WEEKLY_ROW] = WEEKLY_TRACK
     draw_text(pixels, UNAVAILABLE_TEXT, UNAVAILABLE_LABEL)
     return image
+
+
+def breathing_frames(
+    snapshot: UsageSnapshot, now: Optional[str] = None
+) -> List[Tuple[Image.Image, int]]:
+    reference = now or utc_now_iso()
+    return [
+        (render(snapshot, reference, level), BREATH_FRAME_MILLISECONDS)
+        for level in breath_levels()
+    ]
+
+
+def breathing_unavailable_frames() -> List[Tuple[Image.Image, int]]:
+    return [
+        (render_unavailable(level), BREATH_FRAME_MILLISECONDS)
+        for level in breath_levels()
+    ]
 
 
 def scaled_preview(image: Image.Image, scale: int) -> Image.Image:
@@ -365,6 +411,7 @@ def scaled_preview(image: Image.Image, scale: int) -> Image.Image:
 def ascii_art(image: Image.Image) -> str:
     symbol_by_color = {
         BACKGROUND: ".",
+        ATTENTION_BACKGROUND: "@",
         RING_TRACK: "-",
         WEEKLY_TRACK: "_",
         LABEL: "#",

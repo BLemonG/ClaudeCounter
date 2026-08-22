@@ -19,6 +19,7 @@ Von links: ruhig · mittel · knapp · kritisch · veraltet (gedimmt) · keine D
 | Cyaner Punkt | wo im jeweiligen Fenster die Uhr gerade steht |
 | Alles gedimmt | Wert ist veraltet, die Quelle antwortet nicht |
 | Leerer Ring, graues `--` | noch nie Daten gehabt |
+| Orange atmender Hintergrund | eine Sitzung wartet auf deine Eingabe |
 
 Der cyane Punkt folgt der Uhr, nicht dem Zeitpunkt der Messung. Ein Ringpixel
 entspricht rund 5,2 Minuten, ein Pixel der Wochenzeile rund 10,5 Stunden.
@@ -90,6 +91,9 @@ python3 -m claudecounter usage                                      # aktuelle W
 python3 -m claudecounter usage --raw                                # rohe Antwort
 python3 -m claudecounter brightness 40                              # 0 bis 100
 python3 -m claudecounter daemon --verbose                           # im Vordergrund
+python3 -m claudecounter send --session 63 --weekly 29 --breathing  # Atmen testen
+python3 -m claudecounter waiting                                    # wer wartet gerade
+python3 -m claudecounter waiting --clear                            # Atmen abwürgen
 ```
 
 `preview` und `send` nehmen zusätzlich `--stale`, `--session-resets-in <Minuten>`
@@ -124,7 +128,38 @@ Bewusst **nicht** benutzt: Header von `/v1/messages` (verbraucht Kontingent, um
 Kontingent zu messen, und kennt kein Wochenfenster) sowie das Auswerten der
 JSONL-Transkripte.
 
+## Wenn eine Sitzung auf dich wartet
+
+Der Hintergrund hinter den Ziffern atmet dann orange. Ring, Zeitpunkt-Marker und
+Wochenbalken bleiben unverändert, die Prozentzahl bleibt lesbar.
+
+Erkannt wird das über Hooks von Claude Code, nicht über macOS-Benachrichtigungen:
+`Stop` und `Notification` legen eine Markierungsdatei je Sitzung an,
+`UserPromptSubmit`, `SessionStart` und `SessionEnd` löschen sie wieder. Die
+Markierungen liegen in `~/Library/Application Support/ClaudeCounter/waiting/`.
+`tools/install.sh` trägt die Hooks ein, `tools/uninstall.sh` nimmt sie zurück.
+
+Es atmet also, solange **irgendeine** Sitzung wartet, und hört erst auf, wenn
+alle beantwortet sind. `claudecounter waiting` zeigt, welche das sind. Eine
+abgestürzte Sitzung hinterlässt eine Markierung, die nach vier Stunden von selbst
+verfällt.
+
+Das Atmen läuft als Endlos-Animation auf dem Gerät selbst, nicht als Bilderfolge
+vom Mac — der könnte höchstens 1,4 Bilder pro Sekunde schicken. Zwölf Bilder à
+320 ms gehen in acht Paketen und 0,65 Sekunden über eine einzige Verbindung.
+
+Der Daemon zeichnet weiter im Minutentakt, schaut aber alle fünf Sekunden nach
+wartenden Sitzungen; der Wechsel ist also nach wenigen Sekunden auf dem Display.
+
 ## Fehlersuche
+
+**Die Timebox klaut die Audio-Ausgabe**
+Sie meldet sich unter derselben Adresse mit den Profilen `HFP AVRCP A2DP` an,
+macOS sieht also ein Headset. Abschalten lässt sich das gerätseitig nicht, in
+keiner der Referenzen gibt es dafür ein Kommando. Trennen hilft nur kurz:
+`claudecounter disconnect` funktioniert, aber die Timebox baut die Verbindung
+binnen Sekunden selbst wieder auf. Bleibt: unter Systemeinstellungen → Ton die
+gewünschte Ausgabe wählen, oder die Timebox aus der Bluetooth-Liste entfernen.
 
 **„the Claude Code access token expired"**
 Das Token wird nur erneuert, wenn die CLI wirklich benutzt wird —
@@ -190,8 +225,9 @@ Eine nackte Binärdatei stirbt mit SIGABRT, selbst mit eingebettetem
 ```
 claudecounter/
   protocol.py      Divoom-Drahtformat, bytegenau gegen fünf echte Aufnahmen geprüft
-  render.py        16×16-Bild aus einem Messwert
+  render.py        16×16-Bild aus einem Messwert, Standbild und Atem-Schleife
   usage_source.py  Token, Endpunkt, lokale Datei, Fehlerklassen
+  attention.py     Markierungen wartender Sitzungen
   daemon.py        Schleife, Wiederholstrategie, Protokoll
   transport.py     Brücke zum Bluetooth-Helfer
   config.py        Gerätekonfiguration
@@ -199,16 +235,18 @@ claudecounter/
 tools/
   bt_probe.swift   IOBluetooth-Helfer
   build_native.sh  baut und signiert das App-Bündel
-  install.sh       LaunchAgent, SessionStart-Hook, Statusline
+  install.sh       LaunchAgent, Hooks, Statusline
+  session_hook.py  trägt Hooks und Statusline in die Einstellungen ein
   statusline.py    lokale Datenquelle
-tests/             vier eigenständige Suiten, ohne pytest
+  waiting_hook.py  übersetzt Claude-Code-Ereignisse in Markierungen
+tests/             fünf eigenständige Suiten, ohne pytest
 docs/findings.md   Protokollrecherche und alles am Gerät Verifizierte
 ```
 
 Tests laufen ohne Zusatzpakete:
 
 ```bash
-for suite in render protocol usage_source daemon; do python3 tests/test_$suite.py; done
+for suite in render protocol usage_source daemon attention; do python3 tests/test_$suite.py; done
 ```
 
 ## Protokoll
@@ -216,6 +254,10 @@ for suite in render protocol usage_source daemon; do python3 tests/test_$suite.p
 Rahmen: `0x01 | LEN_lo LEN_hi | CMD | ARGS… | CRC_lo CRC_hi | 0x02`, dabei
 `LEN = len(ARGS)+3` und `CRC = sum(LEN_lo, LEN_hi, CMD, ARGS…) & 0xFFFF`
 in Little-Endian. Für die Timebox wird **nicht** escaped.
+
+Standbild: `CMD 0x44`, Argumente `00 0A 0A 04` plus ein Frame.
+Atem-Schleife: `CMD 0x49`, Argumente Gesamtlänge (2 B), Paketnummer (1 B) und ein
+200-Byte-Stück des Frame-Stroms; das Gerät spielt sie danach endlos ab.
 
 Jedes Byte ist entweder gegen eine öffentliche Aufnahme geprüft oder am Gerät
 verifiziert; erfunden wurde keines. Die Herleitung steht in

@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 HELPER_BUNDLE = Path(__file__).resolve().parent / "bin" / "ClaudeCounterBluetooth.app"
 SERIAL_PORT_MARKER = "[SPP 0x1101]"
@@ -94,10 +94,14 @@ def describe_device(mac: str) -> str:
     return stdout.rstrip()
 
 
-def send_packet(mac: str, channel: int, payload: bytes, timeout: float = DEFAULT_TIMEOUT) -> int:
+def send_packets(
+    mac: str, channel: int, payloads: Sequence[bytes], timeout: float = DEFAULT_TIMEOUT
+) -> int:
+    if not payloads:
+        return 0
     with tempfile.TemporaryDirectory(prefix="claudecounter-") as workspace:
         payload_path = Path(workspace) / "payload.hex"
-        payload_path.write_text(payload.hex())
+        payload_path.write_text("\n".join(payload.hex() for payload in payloads) + "\n")
         stdout, stderr = run_helper(
             ["send", mac, str(channel), str(payload_path), "0"], timeout=timeout
         )
@@ -106,3 +110,9 @@ def send_packet(mac: str, channel: int, payload: bytes, timeout: float = DEFAULT
         detail = stderr.strip() or stdout.strip() or "no output"
         raise TransportError(f"the device did not accept the packet: {detail}")
     return int(match.group(1))
+
+
+
+def disconnect(mac: str, timeout: float = 30.0) -> str:
+    stdout, _ = run_helper(["disconnect", mac], timeout=timeout)
+    return stdout.rstrip()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 START_OF_PACKET = 0x01
 END_OF_PACKET = 0x02
@@ -8,10 +8,13 @@ FRAME_MARKER = 0xAA
 SINGLE_FRAME_HEADER = (0x00, 0x0A, 0x0A, 0x04)
 
 COMMAND_SET_IMAGE = 0x44
+COMMAND_SET_ANIMATION_FRAME = 0x49
 COMMAND_SET_BRIGHTNESS = 0x74
 
 STILL_FRAME_DURATION = (0x00, 0x00)
 PALETTE_SIZE_ROLLOVER = 256
+ANIMATION_CHUNK_BYTES = 200
+ANIMATION_MAXIMUM_CHUNKS = 256
 
 Color = Tuple[int, int, int]
 
@@ -105,6 +108,34 @@ def image_packet(image) -> bytes:
     palette, indices = quantize(image)
     frame = encode_frame(palette, indices)
     return packet(COMMAND_SET_IMAGE, bytes(SINGLE_FRAME_HEADER) + frame)
+
+
+def animation_stream(frames: Iterable[Tuple[object, int]]) -> bytes:
+    body = b""
+    for image, milliseconds in frames:
+        palette, indices = quantize(image)
+        body += encode_frame(palette, indices, little_endian_pair(milliseconds))
+    return body
+
+
+def animation_packets(frames: Iterable[Tuple[object, int]]) -> List[bytes]:
+    stream = animation_stream(frames)
+    if not stream:
+        return []
+    chunk_count = -(-len(stream) // ANIMATION_CHUNK_BYTES)
+    if chunk_count > ANIMATION_MAXIMUM_CHUNKS:
+        raise ValueError(
+            f"an animation of {len(stream)} bytes needs {chunk_count} packets, "
+            f"the packet counter only reaches {ANIMATION_MAXIMUM_CHUNKS}"
+        )
+    total = little_endian_pair(len(stream))
+    packets = []
+    for number in range(chunk_count):
+        start = number * ANIMATION_CHUNK_BYTES
+        chunk = stream[start : start + ANIMATION_CHUNK_BYTES]
+        arguments = total + bytes((number,)) + chunk
+        packets.append(packet(COMMAND_SET_ANIMATION_FRAME, arguments))
+    return packets
 
 
 def brightness_packet(level: int) -> bytes:
