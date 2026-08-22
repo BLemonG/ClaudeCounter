@@ -10,8 +10,9 @@ from claudecounter import attention, presence
 
 SESSION_ID_KEY = "session_id"
 EVENT_KEY = "hook_event_name"
-MARKING_EVENTS = ("Stop", "Notification")
+MARKING_EVENTS = ("Notification",)
 CLEARING_EVENTS = ("UserPromptSubmit", "SessionStart")
+TURN_END_EVENTS = ("Stop",)
 ENDING_EVENTS = ("SessionEnd",)
 FALLBACK_SESSION_ID = "unknown-session"
 
@@ -49,8 +50,13 @@ def apply(payload: dict) -> str:
         attention.clear_waiting(session)
         attention.prune_owners()
         return "busy"
+    if event in TURN_END_EVENTS:
+        attention.clear_waiting(session)
+        attention.request_refresh()
+        return "turn over"
     if event in ENDING_EVENTS:
         attention.forget_session(session)
+        attention.request_refresh()
         return "gone"
     return "ignored"
 

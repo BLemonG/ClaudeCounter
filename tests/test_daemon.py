@@ -9,7 +9,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from claudecounter import protocol, transport, usage_source
 from claudecounter import render as renderer
 from claudecounter.config import DeviceConfig
-from claudecounter.daemon import Daemon, FORCED_RESEND_SECONDS, INITIAL_BACKOFF_SECONDS
+from claudecounter.daemon import (
+    Daemon,
+    FORCED_RESEND_SECONDS,
+    INITIAL_BACKOFF_SECONDS,
+    MINIMUM_FETCH_SPACING_SECONDS,
+)
 from claudecounter.snapshot import UsageSnapshot
 
 FAILURES = []
@@ -82,16 +87,30 @@ def snapshot(session: float, weekly: float, stale: bool = False) -> UsageSnapsho
 
 def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
           read_local_usage=lambda: None, resend_interval: float = FORCED_RESEND_SECONDS,
-          a_session_is_waiting=lambda: False) -> Daemon:
+          a_session_is_waiting=lambda: False, refresh=None,
+          minimum_fetch_spacing: float = MINIMUM_FETCH_SPACING_SECONDS) -> Daemon:
+    pending = refresh if refresh is not None else {"asked": False}
+
+    def refresh_requested() -> bool:
+        return pending["asked"]
+
+    def consume_refresh() -> bool:
+        asked = pending["asked"]
+        pending["asked"] = False
+        return asked
+
     return Daemon(
         TARGET,
         quiet_logger(),
         poll_interval=60.0,
         usage_fetch_interval=usage_fetch_interval,
         resend_interval=resend_interval,
+        minimum_fetch_spacing=minimum_fetch_spacing,
         read_usage=read_usage,
         read_local_usage=read_local_usage,
         a_session_is_waiting=a_session_is_waiting,
+        refresh_requested=refresh_requested,
+        consume_refresh=consume_refresh,
         send_packets=display,
         clock=clock,
     )
@@ -508,7 +527,9 @@ def the_loop_reacts_to_a_waiting_session_within_seconds() -> None:
     waiting = {"now": False}
     display, clock = FakeDisplay(), FakeClock()
     daemon = build(lambda: snapshot(63.0, 29.0), display, clock,
+                   usage_fetch_interval=120.0,
                    a_session_is_waiting=lambda: waiting["now"])
+    daemon.tick()
 
     slept = []
 
@@ -532,6 +553,97 @@ def the_loop_reacts_to_a_waiting_session_within_seconds() -> None:
     check(len(slept) == 3, "the wait returns on the first check that sees the change")
 
 
+def a_finished_turn_pulls_the_numbers_in_early() -> None:
+    print("refresh at the end of a turn")
+    calls = []
+    values = iter([snapshot(30.0, 20.0), snapshot(44.0, 21.0), snapshot(45.0, 21.0)])
+
+    def read_usage():
+        calls.append(None)
+        return next(values)
+
+    asked = {"asked": False}
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(read_usage, display, clock, usage_fetch_interval=120.0, refresh=asked)
+
+    daemon.tick()
+    check(len(calls) == 1, "the first tick asks the endpoint")
+
+    clock.advance(30.0)
+    daemon.tick()
+    check(len(calls) == 1, "without a finished turn nothing extra is asked")
+
+    asked["asked"] = True
+    daemon.tick()
+    check(len(calls) == 1,
+          f"a finished turn within {MINIMUM_FETCH_SPACING_SECONDS:.0f}s of the last "
+          "request still waits")
+    check(asked["asked"] is True, "and the request is kept, not thrown away")
+
+    clock.advance(60.0)
+    daemon.tick()
+    check(len(calls) == 2, "once the spacing has passed the finished turn is honoured")
+    check(asked["asked"] is False, "and the request is consumed exactly once")
+    check(
+        display.sent[-1] == still(renderer.render(snapshot(44.0, 21.0))),
+        "the freshly fetched number is what lands on the display",
+    )
+
+    clock.advance(60.0)
+    daemon.tick()
+    check(len(calls) == 2, "a consumed request does not trigger a second fetch")
+
+
+def the_endpoint_is_never_asked_faster_than_the_rate_limit_allows() -> None:
+    print("rate limit headroom")
+    calls = []
+    asked = {"asked": True}
+
+    def read_usage():
+        calls.append(None)
+        return snapshot(30.0, 20.0)
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(read_usage, display, clock, usage_fetch_interval=120.0, refresh=asked)
+
+    for _ in range(360):
+        asked["asked"] = True
+        daemon.tick()
+        clock.advance(10.0)
+    per_hour = len(calls)
+    check(
+        per_hour <= 40,
+        f"even with a turn ending every 10s the endpoint sees {per_hour} requests "
+        "per hour, well under the 60 that triggered the lockout",
+    )
+
+
+def the_loop_wakes_up_when_a_turn_finishes() -> None:
+    print("refresh latency")
+    asked = {"asked": False}
+    display, clock = FakeClock(), FakeClock()
+    display = FakeDisplay()
+    daemon = build(lambda: snapshot(30.0, 20.0), display, clock,
+                   usage_fetch_interval=120.0, refresh=asked)
+    daemon.tick()
+
+    slept = []
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        clock.advance(seconds)
+        if len(slept) == 2:
+            clock.advance(MINIMUM_FETCH_SPACING_SECONDS)
+            asked["asked"] = True
+        return False
+
+    daemon.stop_requested.wait = fake_sleep
+    daemon.wait(60.0)
+    check(len(slept) == 2,
+          "the minute is cut short as soon as a finished turn asks for numbers")
+    check(asked["asked"] is True, "peeking does not consume the request")
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
@@ -549,6 +661,9 @@ def main() -> int:
     a_waiting_session_breathes_even_without_usage_data()
     a_broken_marker_directory_never_stops_the_counter()
     the_loop_reacts_to_a_waiting_session_within_seconds()
+    a_finished_turn_pulls_the_numbers_in_early()
+    the_endpoint_is_never_asked_faster_than_the_rate_limit_allows()
+    the_loop_wakes_up_when_a_turn_finishes()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

@@ -113,16 +113,25 @@ Genutzt werden genau zwei Felder:
 "seven_day": { "utilization": 50.0, "resets_at": "2026-08-24T12:59:59Z" }
 ```
 
-Der Endpunkt hat ein eigenes Rate-Limit. Deshalb fragt der Daemon ihn höchstens
-alle 300 Sekunden, zeichnet aber alle 60 Sekunden neu, und hält bei `HTTP 429`
-exakt so lange still, wie der `retry-after`-Header sagt.
+Der Endpunkt hat ein eigenes Rate-Limit: 60 Anfragen pro Stunde lösten ein
+`HTTP 429` mit `retry-after: 3578` aus. Deshalb fragt der Daemon ihn regulär nur
+alle 120 Sekunden, zeichnet aber alle 60 Sekunden neu, und hält bei `429` exakt
+so lange still, wie der Header sagt.
+
+Zusätzlich fragt er **sofort nach jedem beendeten Turn** — genau dann ändert sich
+der Verbrauch ja. Der `Stop`-Hook legt dafür eine Marke ab, der Daemon sieht sie
+binnen fünf Sekunden. Zwei aufeinanderfolgende Anfragen liegen dabei nie näher
+als `MINIMUM_FETCH_SPACING_SECONDS` (90 s) beieinander; selbst bei einem Turn
+alle zehn Sekunden bleibt es damit bei 40 Anfragen pro Stunde.
 
 Optional und kostenlos gibt es die Werte auch lokal: `tools/statusline.py` klinkt
 sich als Claude-Code-Statusline ein und schreibt `rate_limits` aus deren
 stdin-JSON nach `~/Library/Application Support/ClaudeCounter/usage.json`. Der
 Daemon liest diese Datei bevorzugt und im 60-Sekunden-Takt. Das funktioniert nur
 in der **Terminal**-Version von Claude Code; die Desktop-App ruft Statuslines
-nicht auf.
+nicht auf — dort kommen die Zahlen vom Endpunkt, nach jedem Turn und sonst alle
+zwei Minuten. Hooks führt die Desktop-App dagegen aus, das Atmen funktioniert
+also in beiden.
 
 Bewusst **nicht** benutzt: Header von `/v1/messages` (verbraucht Kontingent, um
 Kontingent zu messen, und kennt kein Wochenfenster) sowie das Auswerten der
@@ -134,8 +143,19 @@ Der Hintergrund hinter den Ziffern atmet dann orange. Ring, Zeitpunkt-Marker und
 Wochenbalken bleiben unverändert, die Prozentzahl bleibt lesbar.
 
 Erkannt wird das über Hooks von Claude Code, nicht über macOS-Benachrichtigungen:
-`Stop` und `Notification` legen eine Markierungsdatei je Sitzung an,
-`UserPromptSubmit` und `SessionStart` löschen sie, `SessionEnd` räumt ganz auf.
+
+| Ereignis | Wirkung |
+| --- | --- |
+| `Notification` | Freigabe nötig, oder die Eingabe liegt seit 60 s brach → atmen |
+| `UserPromptSubmit`, `SessionStart` | Eingabe kam → aufhören |
+| `Stop` | Antwort fertig → aufhören, und neue Zahlen holen |
+| `SessionEnd` | Sitzung vorbei → alles vergessen, neue Zahlen holen |
+
+`Notification` ist genau das Ereignis, auf dem auch die macOS-Benachrichtigungen
+sitzen — nur eben zuverlässig sichtbar. Bewusst **nicht** `Stop`: das feuert nach
+jeder einzelnen Antwort, und wer nebenbei in einem anderen Fenster arbeitet,
+hätte damit ein dauerhaft oranges Display.
+
 Die Markierungen liegen in `~/Library/Application Support/ClaudeCounter/waiting/`.
 `tools/install.sh` trägt die Hooks ein, `tools/uninstall.sh` nimmt sie zurück.
 

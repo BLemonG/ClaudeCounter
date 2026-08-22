@@ -205,32 +205,41 @@ def owners_for(directory: Path):
     return sorted(entry.name for entry in root.iterdir()) if root.is_dir() else []
 
 
+def refresh_pending(directory: Path) -> bool:
+    root = directory / "Library" / "Application Support" / "ClaudeCounter"
+    return (root / attention.REFRESH_FILE_NAME).exists()
+
+
 def the_hook_translates_claude_code_events() -> None:
     print("hook events")
     with tempfile.TemporaryDirectory() as workspace:
         home = Path(workspace)
         check(run_hook({"session_id": "s1", "hook_event_name": "Stop"}, home) == 0,
               "the hook exits zero after Stop")
-        check(markers_for(home) == ["s1"], "Stop marks the session as waiting")
+        check(markers_for(home) == [],
+              "a finished answer alone does not breathe, otherwise every reply would")
+        check(refresh_pending(home) is True,
+              "but a finished answer does ask for fresh usage numbers")
+
+        check(run_hook({"session_id": "s1", "hook_event_name": "Notification"}, home) == 0,
+              "the hook exits zero after Notification")
+        check(markers_for(home) == ["s1"],
+              "a notification is what breathes, the same event macOS notifies on")
 
         run_hook({"session_id": "s1", "hook_event_name": "UserPromptSubmit"}, home)
         check(markers_for(home) == [], "UserPromptSubmit clears the marker")
 
         run_hook({"session_id": "s1", "hook_event_name": "Notification"}, home)
-        check(markers_for(home) == ["s1"], "a Notification marks the session as waiting")
+        run_hook({"session_id": "s1", "hook_event_name": "Stop"}, home)
+        check(markers_for(home) == [],
+              "a permission granted mid turn stops breathing when the turn ends")
 
-        run_hook({"session_id": "s1", "hook_event_name": "SessionEnd"}, home)
-        check(markers_for(home) == [], "SessionEnd clears the marker")
-
-        run_hook({"session_id": "s2", "hook_event_name": "Stop"}, home)
-        run_hook({"session_id": "s3", "hook_event_name": "Stop"}, home)
+        run_hook({"session_id": "s2", "hook_event_name": "Notification"}, home)
+        run_hook({"session_id": "s3", "hook_event_name": "Notification"}, home)
         check(markers_for(home) == ["s2", "s3"], "two sessions can wait at the same time")
         run_hook({"session_id": "s2", "hook_event_name": "UserPromptSubmit"}, home)
         check(markers_for(home) == ["s3"],
               "answering one session leaves the other one breathing")
-        check(owners_for(home) == ["s2"],
-              "the hook remembers the app of the answered session, and SessionEnd "
-              "already forgot the app of the session that ended")
         run_hook({"session_id": "s3", "hook_event_name": "SessionEnd"}, home)
         check(markers_for(home) == [] and "s3" not in owners_for(home),
               "SessionEnd drops the marker and the remembered app together")
@@ -241,11 +250,15 @@ def the_hook_survives_anything_on_stdin() -> None:
     with tempfile.TemporaryDirectory() as workspace:
         home = Path(workspace)
         for payload in ("", "not json at all", "[]", "null", '{"hook_event_name": "Stop"}',
-                        '{"session_id": "s1"}', '{"session_id": null, "hook_event_name": "Stop"}'):
+                        '{"session_id": "s1"}', '{"session_id": "s1", "hook_event_name": "Nope"}'):
             check(run_hook(payload, home) == 0,
                   f"the hook exits zero for {payload!r} and never blocks a session")
+        check(markers_for(home) == [],
+              "none of that garbage produced a marker or a crash")
+        check(run_hook('{"session_id": null, "hook_event_name": "Notification"}', home) == 0,
+              "a notification without a session id is still handled")
         check(markers_for(home) == ["unknown-session"],
-              "an event without a session id still records one marker, not a crash")
+              "and it records one marker under a fallback name")
 
 
 def main() -> int:

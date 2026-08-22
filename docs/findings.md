@@ -913,10 +913,22 @@ von Claude Code, die eine Markierungsdatei je Sitzung anlegen und wieder lösche
 
 | Ereignis | Wirkung |
 | --- | --- |
-| `Stop` | Antwort fertig, wartet auf Eingabe → Markierung setzen |
-| `Notification` | Rückfrage oder Freigabe nötig → Markierung setzen |
-| `UserPromptSubmit` | Eingabe kam → Markierung löschen |
-| `SessionStart`, `SessionEnd` | Markierung löschen |
+| `Notification` | Freigabe nötig oder Eingabe seit 60 s brach → Markierung setzen |
+| `UserPromptSubmit`, `SessionStart` | Eingabe kam → Markierung löschen |
+| `Stop` | Antwort fertig → Markierung löschen, neue Zahlen anfordern |
+| `SessionEnd` | Sitzung vorbei → alles vergessen, neue Zahlen anfordern |
+
+`Stop` war zuerst der Auslöser fürs Atmen und war falsch: es feuert nach **jeder**
+Antwort. Wer nebenbei in einem anderen Fenster arbeitet, bekommt damit ein
+dauerhaft oranges Display — am Gerät beobachtet, drei aufeinanderfolgende
+Minutenzyklen lang. `Notification` trägt genau die Fälle, für die Claude Code
+auch eine macOS-Benachrichtigung schickt, und ist damit die Eins-zu-eins-Ablösung
+dessen, was zuverlässiger werden sollte.
+
+Nebenbei belegt: die Desktop-App **führt Hooks aus** — im `owners`-Verzeichnis
+tauchte die echte Sitzungskennung mit `com.anthropic.claudefordesktop` auf.
+Statuslines ruft sie weiterhin nicht auf (§14), beides gilt also unabhängig
+voneinander.
 
 Eine Markierung je Sitzung, deshalb hört das Atmen erst auf, wenn **jede**
 wartende Sitzung erledigt ist. Sitzungskennungen werden auf `[A-Za-z0-9._-]`
@@ -977,3 +989,28 @@ abzuschalten.
 Gemessen: `IOBluetoothDevice.closeConnection()` meldet Erfolg, aber die Timebox
 baut die Verbindung binnen Sekunden selbst wieder auf — auch bei angehaltenem
 Daemon. Ein Trennen im Bluetooth-Menü hält also nicht.
+
+## 20. Zahlen früher holen, ohne ans Rate-Limit zu stoßen
+
+Beobachtet: das Display zeichnete lückenlos im Minutentakt, die **Zahl** stand
+aber minutenlang still. Ursache ist nicht der Zeichentakt, sondern die
+Datenquelle — ohne Statusline (Desktop-App) kam der Wert nur alle 300 s.
+
+Einfach auf 60 s zu verkürzen scheidet aus: genau 60 Anfragen pro Stunde haben
+in §12.3 das `429` mit `retry-after: 3578` ausgelöst.
+
+Stattdessen wird der Wert dann geholt, wenn er sich geändert hat. Der `Stop`-Hook
+legt `refresh-please` ab, der Daemon sieht die Marke bei seinem
+5-Sekunden-Blick und bricht das Warten ab. Zwei Schutzschichten:
+
+* `MINIMUM_FETCH_SPACING_SECONDS` (90 s) als harter Mindestabstand zwischen zwei
+  Anfragen. Eine Anforderung, die zu früh kommt, wird **nicht** verworfen,
+  sondern bleibt liegen und wird beim nächsten erlaubten Zeitpunkt eingelöst.
+* `USAGE_FETCH_INTERVAL_SECONDS` fällt von 300 s auf 120 s als Grundtakt.
+
+Obergrenze damit 40 Anfragen pro Stunde. In `tests/test_daemon.py` mit einem
+Turn alle zehn Sekunden über eine simulierte Stunde nachgerechnet.
+
+Jede tatsächlich ausgeführte Anfrage verbraucht eine liegende Anforderung, auch
+wenn sie aus dem Grundtakt kam — sonst bliebe die Marke liegen und löste 90 s
+später eine überflüssige zweite Anfrage aus.

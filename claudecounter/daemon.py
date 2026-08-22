@@ -16,7 +16,8 @@ from .config import DeviceConfig
 from .snapshot import UsageSnapshot
 
 POLL_INTERVAL_SECONDS = 60.0
-USAGE_FETCH_INTERVAL_SECONDS = 300.0
+USAGE_FETCH_INTERVAL_SECONDS = 120.0
+MINIMUM_FETCH_SPACING_SECONDS = 90.0
 INITIAL_BACKOFF_SECONDS = 5.0
 MAXIMUM_BACKOFF_SECONDS = 300.0
 FORCED_RESEND_SECONDS = 60.0
@@ -60,9 +61,12 @@ class Daemon:
         usage_fetch_interval: float = USAGE_FETCH_INTERVAL_SECONDS,
         resend_interval: float = FORCED_RESEND_SECONDS,
         attention_poll_interval: float = ATTENTION_POLL_SECONDS,
+        minimum_fetch_spacing: float = MINIMUM_FETCH_SPACING_SECONDS,
         read_usage=usage_source.read_usage,
         read_local_usage=usage_source.read_local_usage,
         a_session_is_waiting=attention.a_session_is_waiting,
+        refresh_requested=attention.refresh_requested,
+        consume_refresh=attention.consume_refresh,
         send_packets=transport.send_packets,
         clock=None,
     ) -> None:
@@ -72,9 +76,12 @@ class Daemon:
         self.usage_fetch_interval = usage_fetch_interval
         self.resend_interval = resend_interval
         self.attention_poll_interval = attention_poll_interval
+        self.minimum_fetch_spacing = minimum_fetch_spacing
         self.read_usage = read_usage
         self.read_local_usage = read_local_usage
         self.a_session_is_waiting = a_session_is_waiting
+        self.refresh_requested = refresh_requested
+        self.consume_refresh = consume_refresh
         self.send_packets = send_packets
         self.clock = clock or __import__("time").monotonic
         self.stop_requested = threading.Event()
@@ -83,12 +90,32 @@ class Daemon:
         self.last_sent_at: Optional[float] = None
         self.consecutive_usage_failures = 0
         self.next_usage_fetch_at: Optional[float] = None
+        self.last_usage_fetch_at: Optional[float] = None
 
     def request_stop(self, *arguments) -> None:
         self.stop_requested.set()
 
-    def usage_fetch_is_due(self) -> bool:
-        return self.next_usage_fetch_at is None or self.clock() >= self.next_usage_fetch_at
+    def spacing_allows_a_fetch(self) -> bool:
+        if self.last_usage_fetch_at is None:
+            return True
+        return (self.clock() - self.last_usage_fetch_at) >= self.minimum_fetch_spacing
+
+    def a_turn_asked_for_fresh_numbers(self, peek_only: bool = False) -> bool:
+        try:
+            if peek_only:
+                return bool(self.refresh_requested())
+            return bool(self.consume_refresh())
+        except Exception:
+            return False
+
+    def usage_fetch_is_due(self, peek_only: bool = False) -> bool:
+        if self.next_usage_fetch_at is None:
+            return True
+        if self.clock() >= self.next_usage_fetch_at:
+            return True
+        if not self.spacing_allows_a_fetch():
+            return False
+        return self.a_turn_asked_for_fresh_numbers(peek_only)
 
     def held_snapshot(self) -> Optional[UsageSnapshot]:
         if self.last_snapshot is None:
@@ -116,6 +143,8 @@ class Daemon:
                 self.last_snapshot = local
                 return local
             return self.held_snapshot()
+        self.last_usage_fetch_at = self.clock()
+        self.a_turn_asked_for_fresh_numbers()
         try:
             snapshot = self.read_usage()
         except usage_source.RateLimited as failure:
@@ -218,17 +247,21 @@ class Daemon:
             self.stop_requested.wait(min(self.attention_poll_interval, remaining))
             if self.attention_is_wanted() != known:
                 return
+            if self.usage_fetch_is_due(peek_only=True):
+                return
 
     def run(self) -> int:
         self.logger.info(
             "starting, target %s channel %d, redrawing every %.0fs, "
             "asking the usage endpoint at most every %.0fs, "
-            "watching for waiting sessions every %.0fs",
+            "watching for waiting sessions every %.0fs, "
+            "and asking early when a turn ends, never closer than %.0fs",
             self.target.mac,
             self.target.channel,
             self.poll_interval,
             self.usage_fetch_interval,
             self.attention_poll_interval,
+            self.minimum_fetch_spacing,
         )
         backoff = INITIAL_BACKOFF_SECONDS
         while not self.stop_requested.is_set():

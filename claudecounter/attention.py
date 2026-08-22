@@ -11,6 +11,7 @@ from . import presence
 ATTENTION_DIRECTORY = Path.home() / "Library" / "Application Support" / "ClaudeCounter"
 WAITING_DIRECTORY = ATTENTION_DIRECTORY / "waiting"
 OWNERS_DIRECTORY_NAME = "owners"
+REFRESH_FILE_NAME = "refresh-please"
 BREATH_MAX_SECONDS = 15 * 60
 OWNER_MAX_AGE_SECONDS = 24 * 60 * 60
 SAFE_SESSION_ID = re.compile(r"[^A-Za-z0-9._-]")
@@ -27,6 +28,28 @@ def waiting_directory(directory: Optional[Path] = None) -> Path:
 
 def owners_directory(directory: Optional[Path] = None) -> Path:
     return waiting_directory(directory).parent / OWNERS_DIRECTORY_NAME
+
+
+def refresh_path(directory: Optional[Path] = None) -> Path:
+    return waiting_directory(directory).parent / REFRESH_FILE_NAME
+
+
+def request_refresh(directory: Optional[Path] = None) -> Path:
+    return write_text(refresh_path(directory), "")
+
+
+def refresh_requested(directory: Optional[Path] = None) -> bool:
+    return refresh_path(directory).exists()
+
+
+def consume_refresh(directory: Optional[Path] = None) -> bool:
+    try:
+        refresh_path(directory).unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return True
 
 
 def marker_path(session_id: str, directory: Optional[Path] = None) -> Path:
