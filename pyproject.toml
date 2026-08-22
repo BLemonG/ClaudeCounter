@@ -1,0 +1,16 @@
+[project]
+name = "claudecounter"
+version = "0.1.0"
+description = "Claude Code usage on a Divoom Timebox Evo"
+requires-python = ">=3.11"
+dependencies = ["Pillow>=10.0"]
+
+[project.scripts]
+claudecounter = "claudecounter.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["claudecounter"]

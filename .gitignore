@@ -1,0 +1,20 @@
+# GPL-Referenzcode, nur lokal zum Nachlesen — darf nicht mitveroeffentlicht werden
+refs/
+
+# gebautes Bluetooth-Helferbuendel
+claudecounter/bin/
+
+# lokal erzeugte Vorschaubilder (die im README liegen unter docs/images/)
+preview-*.png
+
+# lokale Claude-Code-Einstellungen dieser Arbeitskopie
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# macOS
+.DS_Store
