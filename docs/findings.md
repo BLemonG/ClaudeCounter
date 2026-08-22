@@ -584,7 +584,7 @@ Weg als den auf macOS zuverlässigeren.
 
 Statt Socket-Wiederverwendung spart der Daemon Sendevorgänge anders: Ein Frame geht
 nur raus, wenn sich seine Bytes geändert haben oder der letzte erfolgreiche Versand
-länger als `FORCED_RESEND_SECONDS` (600 s) her ist.
+länger als `FORCED_RESEND_SECONDS` her ist. Zu diesem Wert siehe §17.
 
 ### 11.5 Fehlerverhalten, in `tests/test_daemon.py` abgesichert
 
@@ -822,3 +822,36 @@ Sie ist damit ein Zusatz für Terminal-Nutzung, nicht die Hauptquelle. Die
 Hauptquelle ist wieder `api/oauth/usage` mit höchstens einer Anfrage je 300 s.
 Die Fehlerbehandlung aus §12.3 bleibt wichtig, weil der Endpoint sein
 Rate-Limit unabhängig davon durchsetzt.
+
+## 17. Das Gerät vergisst das Bild (2026-08-22, am Gerät beobachtet)
+
+Wer an der Timebox die Modustasten durchklickt, landet in einer der
+geräteeigenen Anzeigen (Uhr, Thermometer, Kanäle). Das gesendete Bild ist damit
+weg, und das Gerät meldet das **nicht**.
+
+Genau hier schlug die Sparmaßnahme aus §11.4 zurück: der Daemon sendet ein
+unverändertes Bild nicht erneut, sondern erst nach `FORCED_RESEND_SECONDS`.
+Bei 600 s hieß das im schlimmsten Fall zehn Minuten ohne Zähler, ohne dass
+irgendetwas im Log auf einen Fehler hindeutete.
+
+`FORCED_RESEND_SECONDS` steht deshalb jetzt auf **60 s** und damit gleichauf mit
+`POLL_INTERVAL_SECONDS`. Das Bild geht faktisch bei jedem Durchlauf raus, und
+die Anzeige holt sich nach einem Moduswechsel binnen einer Minute selbst zurück.
+
+Der Preis ist gering: ein Versand dauert 0,6 bis 0,74 s inklusive Verbindungsaufbau
+(§10), das sind rund 1 % Funkzeit. Die Erkennung des Zustands am Gerät wäre die
+sauberere Lösung, ist aus den vorliegenden Referenzen aber nicht belegbar — und
+erfundene Bytes sind ausgeschlossen.
+
+Das Intervall ist als `Daemon(resend_interval=…)` einstellbar. Die Sparlogik
+bleibt erhalten und wird weiterhin getestet, nur ist ihr Standardwert jetzt so
+kurz, dass sie im Regelbetrieb nicht mehr greift.
+
+Am Gerät verifiziert:
+
+```
+20:03:56 session 14.0% weekly 51.0%, 135 bytes sent
+20:04:57 session 14.0% weekly 51.0%, 135 bytes sent
+20:05:58 session 14.0% weekly 51.0%, 135 bytes sent
+20:06:59 session 14.0% weekly 51.0%, 135 bytes sent
+```

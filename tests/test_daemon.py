@@ -81,12 +81,13 @@ def snapshot(session: float, weekly: float, stale: bool = False) -> UsageSnapsho
 
 
 def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
-          read_local_usage=lambda: None) -> Daemon:
+          read_local_usage=lambda: None, resend_interval: float = FORCED_RESEND_SECONDS) -> Daemon:
     return Daemon(
         TARGET,
         quiet_logger(),
         poll_interval=60.0,
         usage_fetch_interval=usage_fetch_interval,
+        resend_interval=resend_interval,
         read_usage=read_usage,
         read_local_usage=read_local_usage,
         send_packet=display,
@@ -108,15 +109,15 @@ def a_good_reading_reaches_the_display() -> None:
 def an_unchanged_frame_is_not_resent() -> None:
     print("resend policy")
     display, clock = FakeDisplay(), FakeClock()
-    daemon = build(lambda: snapshot(82.0, 41.0), display, clock)
+    daemon = build(lambda: snapshot(82.0, 41.0), display, clock, resend_interval=600.0)
     daemon.tick()
     clock.advance(60.0)
     daemon.tick()
-    check(len(display.sent) == 1, "an identical frame is skipped")
+    check(len(display.sent) == 1, "with a long resend interval an identical frame is skipped")
 
-    clock.advance(FORCED_RESEND_SECONDS)
+    clock.advance(600.0)
     daemon.tick()
-    check(len(display.sent) == 2, "an identical frame is refreshed after the forced interval")
+    check(len(display.sent) == 2, "an identical frame is refreshed after the resend interval")
 
     readings = iter([snapshot(82.0, 41.0), snapshot(83.0, 41.0)])
     display, clock = FakeDisplay(), FakeClock()
@@ -211,13 +212,13 @@ def an_expired_token_never_shows_zero() -> None:
         clock.advance(60.0)
         check(daemon.tick() is True, "repeated expiry keeps the loop alive")
     check(
-        len(display.sent) == 1,
-        "the unavailable frame is not resent before the forced refresh is due",
+        len(display.sent) == 6,
+        "the unavailable frame is refreshed every minute like any other frame",
     )
-
-    clock.advance(FORCED_RESEND_SECONDS)
-    daemon.tick()
-    check(len(display.sent) == 2, "the unavailable frame is refreshed like any other")
+    check(
+        all(packet == display.sent[0] for packet in display.sent),
+        "and it stays the same unavailable frame throughout",
+    )
     display.sent.clear()
 
     readings = iter([snapshot(82.0, 41.0)])
@@ -383,9 +384,29 @@ def a_rolled_over_local_file_is_not_trusted() -> None:
     )
 
 
+def the_display_is_refreshed_every_minute_by_default() -> None:
+    print("recovery after the device changes mode")
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: snapshot(13.0, 51.0), display, clock)
+    for _ in range(4):
+        daemon.tick()
+        clock.advance(60.0)
+    check(
+        len(display.sent) == 4,
+        "the unchanged frame is pushed again every minute, so a device that "
+        "switched modes gets the counter back within 60s",
+    )
+    check(
+        all(packet == display.sent[0] for packet in display.sent),
+        "every one of those pushes carries the same picture",
+    )
+    check(FORCED_RESEND_SECONDS == 60.0, "the default resend interval is one minute")
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
+    the_display_is_refreshed_every_minute_by_default()
     a_failing_endpoint_keeps_the_last_value_and_marks_it_stale()
     an_expired_token_never_shows_zero()
     a_display_failure_backs_off_and_recovers()

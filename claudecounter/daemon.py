@@ -18,7 +18,7 @@ POLL_INTERVAL_SECONDS = 60.0
 USAGE_FETCH_INTERVAL_SECONDS = 300.0
 INITIAL_BACKOFF_SECONDS = 5.0
 MAXIMUM_BACKOFF_SECONDS = 300.0
-FORCED_RESEND_SECONDS = 600.0
+FORCED_RESEND_SECONDS = 60.0
 FAILURE_HEARTBEAT_EVERY = 60
 
 LOG_DIRECTORY = Path.home() / "Library" / "Logs" / "ClaudeCounter"
@@ -56,6 +56,7 @@ class Daemon:
         logger: logging.Logger,
         poll_interval: float = POLL_INTERVAL_SECONDS,
         usage_fetch_interval: float = USAGE_FETCH_INTERVAL_SECONDS,
+        resend_interval: float = FORCED_RESEND_SECONDS,
         read_usage=usage_source.read_usage,
         read_local_usage=usage_source.read_local_usage,
         send_packet=transport.send_packet,
@@ -65,6 +66,7 @@ class Daemon:
         self.logger = logger
         self.poll_interval = poll_interval
         self.usage_fetch_interval = usage_fetch_interval
+        self.resend_interval = resend_interval
         self.read_usage = read_usage
         self.read_local_usage = read_local_usage
         self.send_packet = send_packet
@@ -151,7 +153,7 @@ class Daemon:
             return True
         if self.last_sent_at is None:
             return True
-        return (self.clock() - self.last_sent_at) >= FORCED_RESEND_SECONDS
+        return (self.clock() - self.last_sent_at) >= self.resend_interval
 
     def tick(self) -> bool:
         snapshot = self.current_snapshot()

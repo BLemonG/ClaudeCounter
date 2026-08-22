@@ -146,6 +146,15 @@ Selbst verschuldetes Rate-Limit. Der Daemon pausiert von allein; `retry-after`
 zählt auf einen festen Zeitpunkt herunter und wird durch weitere Anfragen nicht
 verlängert. Nichts zu tun außer warten.
 
+**Auf der Timebox steht wieder die Uhr statt des Zählers**
+Du hast am Gerät die Modustasten benutzt. Das Gerät meldet das nicht, aber der
+Daemon sendet das Bild jede Minute erneut — nach spätestens 60 Sekunden ist der
+Zähler von allein zurück. Sofort erzwingen:
+
+```bash
+launchctl kickstart -k gui/$UID/local.claudecounter.daemon
+```
+
 **Das Display bleibt bei `--`**
 Der Daemon hatte noch nie echte Daten. Absicht — lieber ehrlich leer als eine
 erfundene Null. `python3 -m claudecounter usage` zeigt den Grund.
