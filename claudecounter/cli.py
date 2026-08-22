@@ -169,20 +169,30 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
 
 
 def cmd_waiting(args: argparse.Namespace) -> int:
-    from . import attention
+    from . import attention, presence
 
     if args.clear:
         for session in attention.waiting_sessions():
             attention.clear_waiting(session)
         print("cleared every waiting marker")
         return 0
-    sessions = attention.waiting_sessions()
-    if not sessions:
+
+    front = presence.frontmost_bundle_id()
+    idle = presence.seconds_since_input()
+    print(f"frontmost app: {front or 'unknown'}")
+    print(
+        "last input: "
+        + ("unknown" if idle is None else f"{idle:.0f}s ago")
+        + (" (at the keyboard)" if presence.at_the_keyboard(idle) else " (away)")
+    )
+    markers = attention.waiting_markers()
+    if not markers:
         print("no session is waiting for input")
         return 0
-    print(f"{len(sessions)} session(s) waiting for input:")
-    for session in sessions:
-        print(f"  {session}")
+    print(f"{len(markers)} marker(s):")
+    for session, owner in markers:
+        print(f"  {session}  belongs to {owner or 'an unknown app'}")
+    print("breathing now" if attention.a_session_is_waiting() else "not breathing")
     return 0
 
 

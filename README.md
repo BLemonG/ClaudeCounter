@@ -135,14 +135,40 @@ Wochenbalken bleiben unverändert, die Prozentzahl bleibt lesbar.
 
 Erkannt wird das über Hooks von Claude Code, nicht über macOS-Benachrichtigungen:
 `Stop` und `Notification` legen eine Markierungsdatei je Sitzung an,
-`UserPromptSubmit`, `SessionStart` und `SessionEnd` löschen sie wieder. Die
-Markierungen liegen in `~/Library/Application Support/ClaudeCounter/waiting/`.
+`UserPromptSubmit` und `SessionStart` löschen sie, `SessionEnd` räumt ganz auf.
+Die Markierungen liegen in `~/Library/Application Support/ClaudeCounter/waiting/`.
 `tools/install.sh` trägt die Hooks ein, `tools/uninstall.sh` nimmt sie zurück.
 
-Es atmet also, solange **irgendeine** Sitzung wartet, und hört erst auf, wenn
-alle beantwortet sind. `claudecounter waiting` zeigt, welche das sind. Eine
-abgestürzte Sitzung hinterlässt eine Markierung, die nach vier Stunden von selbst
-verfällt.
+**Es hört auf, sobald du bei der Sitzung warst** — nicht erst, wenn du antwortest.
+Bei jedem `UserPromptSubmit` merkt sich der Hook, welche App gerade vorne war;
+das ist die App, in der diese Sitzung lebt. Der Daemon schaut alle fünf Sekunden
+nach, ob diese App vorne ist **und** ob in den letzten 90 Sekunden jemand Maus
+oder Tastatur bedient hat. Beides zusammen heißt: du hast es gesehen, die
+Markierung wird gelöscht. Nur die vordere App zu sein reicht nicht — ein offenes
+Fenster in einem leeren Zimmer hat niemand gesehen.
+
+Beides wird ohne Berechtigungsabfrage gelesen, über `lsappinfo front` und
+`ioreg -c IOHIDSystem`, zusammen etwa 20 ms.
+
+Zwei Folgen davon:
+
+* Während du vor dem Chat sitzt, atmet es gar nicht erst — du siehst die Antwort
+  ja ohnehin. Es atmet nur, wenn du weggeklickt hast.
+* Danach höchstens `BREATH_MAX_SECONDS` lang, aktuell **15 Minuten**. Danach
+  verfällt die Markierung, egal ob gesehen oder nicht. Der Wert steht als eine
+  Konstante in `claudecounter/attention.py`.
+
+Es atmet, solange **irgendeine** Sitzung wartet, und hört erst auf, wenn jede
+einzelne gesehen wurde; Sitzungen in verschiedenen Apps werden getrennt
+behandelt. `claudecounter waiting` zeigt den ganzen Entscheidungsweg:
+
+```
+frontmost app: com.anthropic.claudefordesktop
+last input: 1s ago (at the keyboard)
+1 marker(s):
+  regel-test  belongs to com.anthropic.claudefordesktop
+not breathing
+```
 
 Das Atmen läuft als Endlos-Animation auf dem Gerät selbst, nicht als Bilderfolge
 vom Mac — der könnte höchstens 1,4 Bilder pro Sekunde schicken. Zwölf Bilder à
@@ -228,6 +254,7 @@ claudecounter/
   render.py        16×16-Bild aus einem Messwert, Standbild und Atem-Schleife
   usage_source.py  Token, Endpunkt, lokale Datei, Fehlerklassen
   attention.py     Markierungen wartender Sitzungen
+  presence.py      vorderste App und Zeit seit der letzten Eingabe
   daemon.py        Schleife, Wiederholstrategie, Protokoll
   transport.py     Brücke zum Bluetooth-Helfer
   config.py        Gerätekonfiguration

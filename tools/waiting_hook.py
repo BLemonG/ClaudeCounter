@@ -6,12 +6,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from claudecounter import attention
+from claudecounter import attention, presence
 
 SESSION_ID_KEY = "session_id"
 EVENT_KEY = "hook_event_name"
 MARKING_EVENTS = ("Stop", "Notification")
-CLEARING_EVENTS = ("UserPromptSubmit", "SessionStart", "SessionEnd")
+CLEARING_EVENTS = ("UserPromptSubmit", "SessionStart")
+ENDING_EVENTS = ("SessionEnd",)
 FALLBACK_SESSION_ID = "unknown-session"
 
 
@@ -40,11 +41,17 @@ def apply(payload: dict) -> str:
     event = str(payload.get(EVENT_KEY, ""))
     session = session_of(payload)
     if event in MARKING_EVENTS:
-        attention.mark_waiting(session)
+        owner = attention.owner_of(session) or presence.frontmost_bundle_id()
+        attention.mark_waiting(session, owner=owner)
         return "waiting"
     if event in CLEARING_EVENTS:
+        attention.remember_owner(session, presence.frontmost_bundle_id())
         attention.clear_waiting(session)
+        attention.prune_owners()
         return "busy"
+    if event in ENDING_EVENTS:
+        attention.forget_session(session)
+        return "gone"
     return "ignored"
 
 

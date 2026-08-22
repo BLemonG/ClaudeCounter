@@ -919,14 +919,38 @@ von Claude Code, die eine Markierungsdatei je Sitzung anlegen und wieder lösche
 | `SessionStart`, `SessionEnd` | Markierung löschen |
 
 Eine Markierung je Sitzung, deshalb hört das Atmen erst auf, wenn **jede**
-wartende Sitzung beantwortet ist. Abgestürzte Sitzungen hinterlassen eine
-Leiche; Markierungen älter als `MARKER_MAX_AGE_SECONDS` (4 h) zählen nicht mehr
-und werden beim Lesen entfernt. Sitzungskennungen werden auf
-`[A-Za-z0-9._-]` reduziert und an Punkten und Bindestrichen beschnitten, damit
-kein `..` als Verzeichnisname übrig bleibt.
+wartende Sitzung erledigt ist. Sitzungskennungen werden auf `[A-Za-z0-9._-]`
+reduziert und an Punkten und Bindestrichen beschnitten, damit kein `..` als
+Verzeichnisname übrig bleibt.
 
 Der Hook schluckt jeden Fehler und liefert immer 0. Er darf eine Sitzung unter
 keinen Umständen blockieren.
+
+### 18.4.1 Aufhören, sobald die Sitzung gesehen wurde
+
+Antworten ist zu spät als Abbruchbedingung — gewünscht ist, dass es aufhört,
+sobald man bei der Sitzung war. Zwei Signale, beide ohne Berechtigungsabfrage
+und zusammen etwa 20 ms:
+
+| Signal | Abfrage | Gemessen |
+| --- | --- | --- |
+| vorderste App | `lsappinfo front`, dann `lsappinfo info -only bundleid <ASN>` | 12 ms, liefert z. B. `com.anthropic.claudefordesktop` |
+| Zeit seit der letzten Eingabe | `ioreg -c IOHIDSystem -d 4`, Feld `HIDIdleTime` in Nanosekunden | 6 ms |
+
+Die zugehörige App wird beim `UserPromptSubmit` festgehalten — in dem Moment
+tippt der Mensch nachweislich in genau diese App. Sie landet in
+`owners/<sitzung>` und wandert bei `Stop` in die Markierung. Gelöscht wird die
+Markierung, wenn diese App vorne ist **und** `HIDIdleTime` unter
+`AT_THE_KEYBOARD_WITHIN_SECONDS` (90 s) liegt.
+
+Die zweite Bedingung ist nicht optional: ein offenes Fenster in einem leeren
+Zimmer ist keine gesehene Sitzung. Umgekehrt bleibt bei unlesbarer vorderster
+App, unlesbarer Leerlaufzeit oder unbekannter Besitzer-App alles beim Atmen —
+im Zweifel lieber melden als verschlucken.
+
+`BREATH_MAX_SECONDS` (15 min) deckelt das Ganze. Markierungen älter als das
+zählen nicht mehr und werden beim Lesen entfernt; damit läuft auch eine
+abgestürzte Sitzung aus.
 
 ### 18.5 Reaktionszeit
 
