@@ -220,12 +220,16 @@ def time_marker_tracks_the_session_window() -> None:
         "150 minutes remaining is half the window",
     )
     check(
-        renderer.session_elapsed_fraction(snapshot_at(0.0, 0.0, resets_in_minutes=0), FIXED_NOW.isoformat()) == 1.0,
-        "no time remaining is a fully elapsed window",
+        renderer.session_elapsed_fraction(snapshot_at(0.0, 0.0, resets_in_minutes=0), FIXED_NOW.isoformat()) == 0.0,
+        "a reset that is due starts the next window at nothing elapsed",
     )
     check(
-        renderer.session_elapsed_fraction(snapshot_at(0.0, 0.0, resets_in_minutes=-30), FIXED_NOW.isoformat()) == 1.0,
-        "an overdue reset clamps to fully elapsed",
+        renderer.session_elapsed_fraction(snapshot_at(0.0, 0.0, resets_in_minutes=-30), FIXED_NOW.isoformat()) == 0.1,
+        "an overdue reset keeps counting inside the window that followed it",
+    )
+    check(
+        renderer.session_elapsed_fraction(snapshot_at(0.0, 0.0, resets_in_minutes=-2550), FIXED_NOW.isoformat()) == 0.5,
+        "a reset that is days old still lands where the clock says",
     )
     check(
         renderer.session_elapsed_fraction(snapshot_at(0.0, 0.0, resets_in_minutes=600), FIXED_NOW.isoformat()) == 0.0,
@@ -238,8 +242,12 @@ def time_marker_tracks_the_session_window() -> None:
 
     check(renderer.time_marker_position(0.0) == (8, 0), "a fresh window marks top centre")
     check(
-        renderer.time_marker_position(1.0) == renderer.ring_positions()[total - 1],
-        "a spent window marks the last ring pixel",
+        renderer.time_marker_position(1.0) == renderer.ring_positions()[0],
+        "a spent window wraps back to top centre",
+    )
+    check(
+        renderer.time_marker_position((total - 1) / total) == renderer.ring_positions()[total - 1],
+        "the last slice of the window marks the last ring pixel",
     )
     check(
         renderer.time_marker_position(0.5) == renderer.ring_positions()[total // 2],
@@ -292,8 +300,12 @@ def weekly_marker_tracks_the_seven_day_window() -> None:
         "84 hours remaining is half the week",
     )
     check(
-        renderer.weekly_elapsed_fraction(snapshot_at(0.0, 0.0, weekly_resets_in_hours=0), FIXED_NOW.isoformat()) == 1.0,
-        "no time remaining is a fully elapsed week",
+        renderer.weekly_elapsed_fraction(snapshot_at(0.0, 0.0, weekly_resets_in_hours=0), FIXED_NOW.isoformat()) == 0.0,
+        "a weekly reset that is due starts the next week at nothing elapsed",
+    )
+    check(
+        renderer.weekly_elapsed_fraction(snapshot_at(0.0, 0.0, weekly_resets_in_hours=-84), FIXED_NOW.isoformat()) == 0.5,
+        "an overdue weekly reset keeps counting inside the week that followed it",
     )
     check(
         renderer.weekly_elapsed_fraction(snapshot_at(0.0, 0.0), FIXED_NOW.isoformat()) is None,
@@ -301,7 +313,11 @@ def weekly_marker_tracks_the_seven_day_window() -> None:
     )
 
     check(renderer.weekly_marker_column(0.0) == 0, "a fresh week marks the leftmost pixel")
-    check(renderer.weekly_marker_column(1.0) == renderer.SIZE - 1, "a spent week marks the rightmost pixel")
+    check(renderer.weekly_marker_column(1.0) == 0, "a spent week wraps back to the leftmost pixel")
+    check(
+        renderer.weekly_marker_column((renderer.SIZE - 1) / renderer.SIZE) == renderer.SIZE - 1,
+        "the last slice of the week marks the rightmost pixel",
+    )
     check(renderer.weekly_marker_column(0.5) == renderer.SIZE // 2, "half a week marks the middle")
 
     without_marker = frame(82.0, 41.0)

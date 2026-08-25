@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,10 +18,17 @@ from claudecounter.daemon import (
     MINIMUM_FETCH_SPACING_SECONDS,
 )
 from claudecounter.snapshot import UsageSnapshot
+from pathlib import Path
 
 FAILURES = []
 
 TARGET = DeviceConfig(mac="AA:BB:CC:DD:EE:FF", channel=1)
+
+SCRATCH = tempfile.TemporaryDirectory()
+
+
+def scratch_state_path():
+    return Path(SCRATCH.name) / "state.json"
 
 
 def check(condition: bool, description: str) -> None:
@@ -102,6 +111,7 @@ def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
     return Daemon(
         TARGET,
         quiet_logger(),
+        published_state_path=scratch_state_path(),
         poll_interval=60.0,
         usage_fetch_interval=usage_fetch_interval,
         resend_interval=resend_interval,
@@ -644,6 +654,43 @@ def the_loop_wakes_up_when_a_turn_finishes() -> None:
     check(asked["asked"] is True, "peeking does not consume the request")
 
 
+def the_reading_is_published_for_the_menu() -> None:
+    print("published reading")
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: snapshot(64.0, 7.0), display, clock)
+    daemon.tick()
+    published = json.loads(daemon.published_state_path.read_text())
+    check(published["session_pct"] == 64.0, "the menu can read the session percentage")
+    check(
+        published["session_resets_at"] == "2026-08-22T20:00:00+00:00",
+        "and the reset moment the blue dot needs",
+    )
+    check(published["stale"] is False, "and whether the reading is stale")
+    check("written_at" in published, "and when it was written")
+
+    def no_login():
+        raise usage_source.MissingCredentials("no login")
+
+    empty = build(no_login, FakeDisplay(), FakeClock())
+    empty.tick()
+    troubled = json.loads(empty.published_state_path.read_text())
+    check(
+        "session_pct" not in troubled,
+        "without a reading the menu is told there is no percentage",
+    )
+    check(
+        troubled["trouble"] == "MissingCredentials",
+        "and why the numbers are missing, without going near the keychain itself",
+    )
+    check(troubled["trouble_reason"] == "no login", "including the spoken reason")
+
+    display, clock = FakeDisplay(), FakeClock()
+    recovered = build(lambda: snapshot(64.0, 7.0), display, clock)
+    recovered.tick()
+    healthy = json.loads(recovered.published_state_path.read_text())
+    check(healthy["trouble"] is None, "a good reading clears the trouble again")
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
@@ -664,6 +711,7 @@ def main() -> int:
     a_finished_turn_pulls_the_numbers_in_early()
     the_endpoint_is_never_asked_faster_than_the_rate_limit_allows()
     the_loop_wakes_up_when_a_turn_finishes()
+    the_reading_is_published_for_the_menu()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

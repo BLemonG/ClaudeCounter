@@ -262,18 +262,15 @@ def parse_timestamp(text: Optional[str]) -> Optional[datetime]:
 
 
 def elapsed_fraction(
-    resets_at_text: Optional[str], fetched_at_text: Optional[str], window_seconds: int
+    resets_at_text: Optional[str], now_text: Optional[str], window_seconds: int
 ) -> Optional[float]:
     resets_at = parse_timestamp(resets_at_text)
-    fetched_at = parse_timestamp(fetched_at_text)
-    if resets_at is None or fetched_at is None:
+    now = parse_timestamp(now_text)
+    if resets_at is None or now is None:
         return None
-    remaining_seconds = (resets_at - fetched_at).total_seconds()
-    if remaining_seconds <= 0.0:
-        return 1.0
-    if remaining_seconds >= window_seconds:
-        return 0.0
-    return 1.0 - remaining_seconds / window_seconds
+    remaining_seconds = (resets_at - now).total_seconds()
+    elapsed_in_current_window = (window_seconds - remaining_seconds) % window_seconds
+    return elapsed_in_current_window / window_seconds
 
 
 def session_elapsed_fraction(
@@ -286,8 +283,7 @@ def session_elapsed_fraction(
 
 def time_marker_position(fraction: float) -> Position:
     positions = ring_positions()
-    index = int(round(max(0.0, min(1.0, fraction)) * len(positions)))
-    return positions[min(index, len(positions) - 1)]
+    return positions[int(fraction * len(positions)) % len(positions)]
 
 
 def draw_session_ring(pixels, percent: float, stale: bool) -> None:
@@ -338,8 +334,7 @@ def weekly_elapsed_fraction(
 
 
 def weekly_marker_column(fraction: float) -> int:
-    column = int(round(max(0.0, min(1.0, fraction)) * SIZE))
-    return min(column, SIZE - 1)
+    return int(fraction * SIZE) % SIZE
 
 
 def draw_weekly_bar(pixels, percent: float, stale: bool) -> None:

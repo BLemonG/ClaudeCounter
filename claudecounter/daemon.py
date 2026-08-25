@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 import signal
@@ -13,7 +14,7 @@ from . import render as renderer
 from . import transport
 from . import usage_source
 from .config import DeviceConfig
-from .snapshot import UsageSnapshot
+from .snapshot import UsageSnapshot, utc_now_iso
 
 POLL_INTERVAL_SECONDS = 60.0
 USAGE_FETCH_INTERVAL_SECONDS = 120.0
@@ -23,6 +24,8 @@ MAXIMUM_BACKOFF_SECONDS = 300.0
 FORCED_RESEND_SECONDS = 60.0
 ATTENTION_POLL_SECONDS = 5.0
 FAILURE_HEARTBEAT_EVERY = 60
+
+PUBLISHED_STATE_PATH = attention.ATTENTION_DIRECTORY / "state.json"
 
 LOG_DIRECTORY = Path.home() / "Library" / "Logs" / "ClaudeCounter"
 LOG_PATH = LOG_DIRECTORY / "claudecounter.log"
@@ -62,6 +65,7 @@ class Daemon:
         resend_interval: float = FORCED_RESEND_SECONDS,
         attention_poll_interval: float = ATTENTION_POLL_SECONDS,
         minimum_fetch_spacing: float = MINIMUM_FETCH_SPACING_SECONDS,
+        published_state_path: Path = PUBLISHED_STATE_PATH,
         read_usage=usage_source.read_usage,
         read_local_usage=usage_source.read_local_usage,
         a_session_is_waiting=attention.a_session_is_waiting,
@@ -77,6 +81,7 @@ class Daemon:
         self.resend_interval = resend_interval
         self.attention_poll_interval = attention_poll_interval
         self.minimum_fetch_spacing = minimum_fetch_spacing
+        self.published_state_path = published_state_path
         self.read_usage = read_usage
         self.read_local_usage = read_local_usage
         self.a_session_is_waiting = a_session_is_waiting
@@ -89,6 +94,8 @@ class Daemon:
         self.last_payloads: Optional[List[bytes]] = None
         self.last_sent_at: Optional[float] = None
         self.consecutive_usage_failures = 0
+        self.last_trouble: Optional[str] = None
+        self.last_trouble_reason: Optional[str] = None
         self.next_usage_fetch_at: Optional[float] = None
         self.last_usage_fetch_at: Optional[float] = None
 
@@ -124,6 +131,10 @@ class Daemon:
             return self.last_snapshot.marked_stale()
         return self.last_snapshot
 
+    def remember_trouble(self, failure: Exception) -> None:
+        self.last_trouble = type(failure).__name__
+        self.last_trouble_reason = str(failure)
+
     def pause_usage_requests(self, seconds: float) -> None:
         self.next_usage_fetch_at = self.clock() + seconds
 
@@ -149,6 +160,7 @@ class Daemon:
             snapshot = self.read_usage()
         except usage_source.RateLimited as failure:
             self.consecutive_usage_failures += 1
+            self.remember_trouble(failure)
             self.pause_usage_requests(failure.retry_after)
             self.logger.warning(
                 "usage endpoint rate limited, pausing requests for %ds",
@@ -157,6 +169,7 @@ class Daemon:
             return self.held_snapshot()
         except usage_source.UsageError as failure:
             self.consecutive_usage_failures += 1
+            self.remember_trouble(failure)
             first_failure = self.consecutive_usage_failures == 1
             heartbeat_due = self.consecutive_usage_failures % FAILURE_HEARTBEAT_EVERY == 0
             if first_failure:
@@ -180,6 +193,8 @@ class Daemon:
                 self.consecutive_usage_failures,
             )
             self.consecutive_usage_failures = 0
+        self.last_trouble = None
+        self.last_trouble_reason = None
         self.last_snapshot = snapshot
         return snapshot
 
@@ -215,8 +230,24 @@ class Daemon:
             ), description + ", a session is waiting for input"
         return [protocol.image_packet(renderer.render(snapshot))], description
 
+    def publish_snapshot(self, snapshot: Optional[UsageSnapshot]) -> None:
+        try:
+            self.published_state_path.parent.mkdir(parents=True, exist_ok=True)
+            published = dict(snapshot.to_dict()) if snapshot is not None else {}
+            published["trouble"] = self.last_trouble
+            published["trouble_reason"] = self.last_trouble_reason
+            published["written_at"] = utc_now_iso()
+            beside = self.published_state_path.with_name(
+                self.published_state_path.name + ".writing"
+            )
+            beside.write_text(json.dumps(published, indent=2, sort_keys=True) + "\n")
+            beside.replace(self.published_state_path)
+        except OSError:
+            self.logger.debug("could not publish the current reading")
+
     def tick(self) -> bool:
         snapshot = self.current_snapshot()
+        self.publish_snapshot(snapshot)
         waiting = self.attention_is_wanted()
         payloads, description = self.frames_to_send(snapshot, waiting)
 

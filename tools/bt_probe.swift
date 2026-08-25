@@ -194,6 +194,8 @@ final class RFCOMMSender: NSObject, IOBluetoothRFCOMMChannelDelegate {
             note("could not resolve address \(address)")
             return 3
         }
+        SDPProbe().run(device, timeout: 10.0)
+
         var channel: IOBluetoothRFCOMMChannel?
         let requestStatus = device.openRFCOMMChannelAsync(&channel, withChannelID: channelID, delegate: self)
         if requestStatus != kIOReturnSuccess {

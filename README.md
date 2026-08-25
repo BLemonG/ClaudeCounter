@@ -83,6 +83,58 @@ Wieder entfernen:
 tools/uninstall.sh
 ```
 
+## Ohne Terminal starten
+
+Nach `tools/install.sh` läuft alles von selbst: drei launchd-Dienste starten bei
+der Anmeldung und laufen weiter, egal ob ein Terminal oder Claude Code offen ist.
+
+| Dienst | Label | Aufgabe |
+| --- | --- | --- |
+| Zähler | `local.claudecounter.daemon` | holt die Werte und zeichnet das Display |
+| Tonschutz | `local.claudecounter.audioguard` | hält Ton-Ein- und -Ausgang von der Box weg |
+| Menü | `local.claudecounter.menu` | Eintrag oben in der Menüleiste |
+
+In der Menüleiste steht ein farbiger Ring mit dem Sitzungswert darin — dasselbe
+Bild wie auf der Box, nur klein. Der Ring füllt sich mit dem Prozentwert und
+wechselt bei denselben Schwellen die Farbe:
+
+| Sitzung | Farbe |
+| --- | --- |
+| unter 60 % | grün |
+| 60 bis 80 % | gelb |
+| 80 bis 95 % | orange |
+| ab 95 % | rot |
+
+Blass dargestellt heißt, dass der Wert veraltet ist, weil die letzte Abfrage nicht
+durchkam. Ein `–` statt einer Zahl heißt, dass noch gar kein Messwert vorliegt.
+Der Mauszeiger auf dem Ring zeigt Sitzung und Woche als Kurzhinweis. Ein Klick
+öffnet:
+
+- Sitzungs- und Wochenwert samt Uhrzeit der letzten Messung
+- Zähler starten oder stoppen
+- Anzeige jetzt auffrischen
+- Tonschutz starten oder stoppen
+- Protokoll öffnen
+
+Das Menü lässt sich auch einzeln starten, per Doppelklick auf
+`claudecounter/bin/ClaudeCounterMenu.app` oder mit
+
+```bash
+open claudecounter/bin/ClaudeCounterMenu.app
+```
+
+Von Hand steuern geht ohne das Menü genauso:
+
+```bash
+launchctl kickstart -k gui/$UID/local.claudecounter.daemon   # neu starten
+launchctl bootout gui/$UID/local.claudecounter.daemon        # anhalten
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/local.claudecounter.daemon.plist
+launchctl list | grep claudecounter                          # was läuft
+```
+
+Dieselben vier Befehle gelten für `local.claudecounter.audioguard` und
+`local.claudecounter.menu`. `tools/uninstall.sh` entfernt alle drei wieder.
+
 ## Bedienung
 
 ```bash
@@ -281,8 +333,10 @@ claudecounter/
   cli.py           Unterbefehle
 tools/
   bt_probe.swift   IOBluetooth-Helfer
-  build_native.sh  baut und signiert das App-Bündel
-  install.sh       LaunchAgent, Hooks, Statusline
+  audio_guard.swift  hält Ton-Ein- und -Ausgang von der Box weg
+  menubar.swift    Menüleisteneintrag mit Start, Stopp und Messwert
+  build_native.sh  baut und signiert die drei Bündel
+  install.sh       drei LaunchAgents, Hooks, Statusline
   session_hook.py  trägt Hooks und Statusline in die Einstellungen ein
   statusline.py    lokale Datenquelle
   waiting_hook.py  übersetzt Claude-Code-Ereignisse in Markierungen
