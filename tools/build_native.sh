@@ -14,8 +14,10 @@ MENU="claudecounter/bin/ClaudeCounterMenu.app"
 rm -rf "$MENU"
 mkdir -p "$MENU/Contents/MacOS"
 cp tools/Info.menubar.plist "$MENU/Contents/Info.plist"
-swiftc -O -framework AppKit -o "$MENU/Contents/MacOS/ClaudeCounterMenu" tools/menubar.swift
-codesign --force --deep --sign - "$MENU"
+swiftc -O -framework AppKit -framework UserNotifications \
+    -o "$MENU/Contents/MacOS/ClaudeCounterMenu" tools/menubar.swift
+codesign --force --deep --sign - \
+    -r='designated => identifier "local.claudecounter.menu"' "$MENU"
 codesign --force --deep --sign - "$BUNDLE"
 
 echo "built $BUNDLE"

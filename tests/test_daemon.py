@@ -31,6 +31,10 @@ def scratch_state_path():
     return Path(SCRATCH.name) / "state.json"
 
 
+def scratch_brightness_path():
+    return Path(SCRATCH.name) / "brightness"
+
+
 def check(condition: bool, description: str) -> None:
     if condition:
         print(f"  ok   {description}")
@@ -112,6 +116,7 @@ def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
         TARGET,
         quiet_logger(),
         published_state_path=scratch_state_path(),
+        brightness_path=scratch_brightness_path(),
         poll_interval=60.0,
         usage_fetch_interval=usage_fetch_interval,
         resend_interval=resend_interval,
@@ -691,6 +696,59 @@ def the_reading_is_published_for_the_menu() -> None:
     check(healthy["trouble"] is None, "a good reading clears the trouble again")
 
 
+def the_slider_reaches_the_lamp() -> None:
+    print("brightness slider")
+    wish = scratch_brightness_path()
+    wish.unlink(missing_ok=True)
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: snapshot(64.0, 7.0), display, clock, resend_interval=600.0)
+    daemon.tick()
+    check(len(display.sent[-1]) == 1, "without a wish only the picture is sent")
+
+    wish.write_text("30\n")
+    check(daemon.brightness_is_due() is True, "a new wish wakes the loop early")
+    daemon.tick()
+    sent = display.sent[-1]
+    check(sent[0] == protocol.brightness_packet(30), "the wish rides along as the first packet")
+    check(len(sent) == 2, "together with the picture")
+
+    before = len(display.sent)
+    daemon.tick()
+    check(len(display.sent) == before, "an unchanged wish is not sent again")
+    check(daemon.brightness_is_due() is False, "and no longer wakes the loop")
+
+    wish.write_text("85")
+    daemon.tick()
+    check(
+        display.sent[-1][0] == protocol.brightness_packet(85),
+        "moving the slider again reaches the lamp",
+    )
+
+    wish.write_text("nonsense")
+    before = len(display.sent)
+    daemon.tick()
+    check(len(display.sent) == before, "a damaged wish file changes nothing")
+
+    wish.write_text("400")
+    daemon.tick()
+    check(
+        display.sent[-1][0] == protocol.brightness_packet(100),
+        "an out of range wish is clamped, never rejected",
+    )
+
+    display.failure = transport.TransportError("display unreachable")
+    wish.write_text("10")
+    daemon.tick()
+    display.failure = None
+    daemon.tick()
+    check(
+        display.sent[-1][0] == protocol.brightness_packet(10),
+        "a wish that could not be delivered is retried, not lost",
+    )
+    wish.unlink(missing_ok=True)
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
@@ -712,6 +770,7 @@ def main() -> int:
     the_endpoint_is_never_asked_faster_than_the_rate_limit_allows()
     the_loop_wakes_up_when_a_turn_finishes()
     the_reading_is_published_for_the_menu()
+    the_slider_reaches_the_lamp()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

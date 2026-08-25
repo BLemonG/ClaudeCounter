@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UserNotifications
 
 let counterLabel = "local.claudecounter.daemon"
 let audioGuardLabel = "local.claudecounter.audioguard"
@@ -10,6 +11,24 @@ let logFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/ClaudeCounter/claudecounter.log")
 let stateFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/ClaudeCounter/state.json")
+let brightnessFile = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/ClaudeCounter/brightness")
+let defaultBrightness = 50
+
+func wantedBrightness() -> Int {
+    guard let text = try? String(contentsOf: brightnessFile, encoding: .utf8),
+          let level = Int(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    else { return defaultBrightness }
+    return max(0, min(100, level))
+}
+
+func writeWantedBrightness(_ level: Int) {
+    try? FileManager.default.createDirectory(
+        at: brightnessFile.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try? String(level).write(to: brightnessFile, atomically: true, encoding: .utf8)
+}
 let agentDirectory = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/LaunchAgents")
 
@@ -205,6 +224,13 @@ func startLoginInTerminal() -> Bool {
     return NSWorkspace.shared.open(script)
 }
 
+func openTheNotificationSettings() {
+    guard let panel = URL(
+        string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+    ) else { return }
+    NSWorkspace.shared.open(panel)
+}
+
 func explainMissingClaude() {
     let alert = NSAlert()
     alert.messageText = "Claude Code nicht gefunden"
@@ -212,6 +238,95 @@ func explainMissingClaude() {
         "Das Programm claude liess sich nicht finden. Melde dich von Hand an: "
         + "ein Terminal öffnen und dort claude auth login eingeben."
     alert.runModal()
+}
+
+let loginTroubleCategory = "anmeldung-abgelaufen"
+let loginTroubleAction = "jetzt-anmelden"
+let announceAgainAfter: TimeInterval = 6 * 60 * 60
+
+final class Notifier: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = Notifier()
+
+    private var announcedTrouble: String?
+    private var announcedAt: Date?
+    private var allowed = false
+
+    func begin() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        let logIn = UNNotificationAction(
+            identifier: loginTroubleAction,
+            title: "Jetzt anmelden",
+            options: [.foreground]
+        )
+        center.setNotificationCategories([
+            UNNotificationCategory(
+                identifier: loginTroubleCategory,
+                actions: [logIn],
+                intentIdentifiers: [],
+                options: []
+            )
+        ])
+        center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
+            DispatchQueue.main.async { self?.allowed = granted }
+        }
+    }
+
+    func permissionState(_ answer: @escaping (UNAuthorizationStatus) -> Void) {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            DispatchQueue.main.async { answer(settings.authorizationStatus) }
+        }
+    }
+
+    func loginIsBack() {
+        announcedTrouble = nil
+        announcedAt = nil
+    }
+
+    func announceLoginIsGone(_ trouble: String, _ spoken: String) {
+        if announcedTrouble == trouble, let when = announcedAt,
+           Date().timeIntervalSince(when) < announceAgainAfter {
+            return
+        }
+        announcedTrouble = trouble
+        announcedAt = Date()
+
+        let note = UNMutableNotificationContent()
+        note.title = "Claude-Anmeldung abgelaufen"
+        note.body = spoken + ". Die Auslastung wird bis zur Neuanmeldung nicht mehr aktualisiert."
+        note.categoryIdentifier = loginTroubleCategory
+        note.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(
+                identifier: loginTroubleCategory,
+                content: note,
+                trigger: nil
+            )
+        )
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler answer: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        answer([.banner, .list, .sound])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler done: @escaping () -> Void
+    ) {
+        let chosen = response.actionIdentifier
+        if chosen == loginTroubleAction || chosen == UNNotificationDefaultActionIdentifier {
+            NSApp.activate(ignoringOtherApps: true)
+            if !startLoginInTerminal() {
+                explainMissingClaude()
+            }
+        }
+        done()
+    }
 }
 
 let sessionGreen = NSColor(srgbRed: 0.0, green: 220.0 / 255.0, blue: 80.0 / 255.0, alpha: 1.0)
@@ -325,14 +440,35 @@ final class MenuController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
     private var refreshTimer: Timer?
+    private var notificationState: UNAuthorizationStatus = .notDetermined
+    private let brightnessLabel = NSTextField(labelWithString: "")
+    private let brightnessSlider = NSSlider()
 
     override init() {
         super.init()
         menu.delegate = self
         statusItem.menu = menu
+        Notifier.shared.begin()
         redrawTitle()
+        watchLogin()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
             self?.redrawTitle()
+            self?.watchLogin()
+        }
+    }
+
+    private func watchLogin() {
+        Notifier.shared.permissionState { [weak self] status in
+            self?.notificationState = status
+        }
+        let state = publishedState()
+        if let trouble = state?.trouble, loginIsGone(trouble) {
+            Notifier.shared.announceLoginIsGone(
+                trouble,
+                spokenTrouble(trouble, state?.troubleReason) ?? trouble
+            )
+        } else if state?.trouble == nil {
+            Notifier.shared.loginIsBack()
         }
     }
 
@@ -375,12 +511,17 @@ final class MenuController: NSObject, NSMenuDelegate {
         if loginIsGone(state?.trouble) {
             menu.addItem(action("Jetzt neu anmelden …", #selector(logInAgain)))
         }
+        if notificationState == .denied {
+            menu.addItem(disabled("Mitteilungen sind abgeschaltet"))
+            menu.addItem(action("Mitteilungen einschalten …", #selector(openNotificationSettings)))
+        }
         menu.addItem(.separator())
 
         let counterRuns = serviceIsLoaded(counterLabel)
         menu.addItem(disabled(counterRuns ? "Zähler läuft" : "Zähler gestoppt"))
         menu.addItem(action(counterRuns ? "Zähler stoppen" : "Zähler starten", #selector(toggleCounter)))
         menu.addItem(action("Anzeige jetzt auffrischen", #selector(askForRefresh)))
+        menu.addItem(brightnessRow(counterRuns))
         menu.addItem(.separator())
 
         let guardRuns = serviceIsLoaded(audioGuardLabel)
@@ -391,6 +532,38 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(action("Bei Claude neu anmelden …", #selector(logInAgain)))
         menu.addItem(action("Protokoll öffnen", #selector(openLog)))
         menu.addItem(action("Menü beenden", #selector(leave)))
+    }
+
+    private func brightnessRow(_ counterRuns: Bool) -> NSMenuItem {
+        let level = wantedBrightness()
+        brightnessLabel.stringValue = counterRuns
+            ? "Helligkeit \(level) %"
+            : "Helligkeit \(level) % (wirkt, sobald der Zähler läuft)"
+        brightnessLabel.font = NSFont.menuFont(ofSize: 13)
+        brightnessLabel.textColor = counterRuns ? .labelColor : .secondaryLabelColor
+        brightnessLabel.frame = NSRect(x: 14, y: 25, width: 260, height: 16)
+
+        brightnessSlider.minValue = 0
+        brightnessSlider.maxValue = 100
+        brightnessSlider.doubleValue = Double(level)
+        brightnessSlider.isContinuous = true
+        brightnessSlider.target = self
+        brightnessSlider.action = #selector(brightnessMoved(_:))
+        brightnessSlider.frame = NSRect(x: 14, y: 3, width: 260, height: 20)
+
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: 288, height: 46))
+        row.addSubview(brightnessLabel)
+        row.addSubview(brightnessSlider)
+
+        let entry = NSMenuItem()
+        entry.view = row
+        return entry
+    }
+
+    @objc private func brightnessMoved(_ slider: NSSlider) {
+        let level = Int(slider.doubleValue.rounded())
+        brightnessLabel.stringValue = "Helligkeit \(level) %"
+        writeWantedBrightness(level)
     }
 
     private func disabled(_ title: String) -> NSMenuItem {
@@ -423,6 +596,10 @@ final class MenuController: NSObject, NSMenuDelegate {
         if !startLoginInTerminal() {
             explainMissingClaude()
         }
+    }
+
+    @objc private func openNotificationSettings() {
+        openTheNotificationSettings()
     }
 
     @objc private func openLog() {

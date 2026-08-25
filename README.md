@@ -141,7 +141,7 @@ Dieselben vier Befehle gelten f체r `local.claudecounter.audioguard` und
 python3 -m claudecounter preview --session 82 --weekly 41 --ascii   # ohne Hardware
 python3 -m claudecounter usage                                      # aktuelle Werte
 python3 -m claudecounter usage --raw                                # rohe Antwort
-python3 -m claudecounter brightness 40                              # 0 bis 100
+python3 -m claudecounter brightness --level 40                      # 0 bis 100, sofort
 python3 -m claudecounter daemon --verbose                           # im Vordergrund
 python3 -m claudecounter send --session 63 --weekly 29 --breathing  # Atmen testen
 python3 -m claudecounter waiting                                    # wer wartet gerade
@@ -151,6 +151,12 @@ python3 -m claudecounter waiting --clear                            # Atmen abw�
 `preview` und `send` nehmen zus채tzlich `--stale`, `--session-resets-in <Minuten>`
 und `--weekly-resets-in <Stunden>`, um jeden Anzeigezustand ohne echte Daten
 nachzustellen.
+
+Die Helligkeit l채sst sich auch mit dem Regler im Men체leisten-Symbol stellen. Der
+Regler schreibt den Wunsch nach
+`~/Library/Application Support/ClaudeCounter/brightness`; gesendet wird er vom
+Daemon, damit nur ein Prozess auf dem RFCOMM-Kanal sitzt. Er reist beim n채chsten
+Bild mit, sp채testens nach f체nf Sekunden. Ohne laufenden Z채hler passiert nichts.
 
 Logdatei: `~/Library/Logs/ClaudeCounter/claudecounter.log`
 

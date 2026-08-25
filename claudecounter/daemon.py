@@ -26,6 +26,7 @@ ATTENTION_POLL_SECONDS = 5.0
 FAILURE_HEARTBEAT_EVERY = 60
 
 PUBLISHED_STATE_PATH = attention.ATTENTION_DIRECTORY / "state.json"
+BRIGHTNESS_PATH = attention.ATTENTION_DIRECTORY / "brightness"
 
 LOG_DIRECTORY = Path.home() / "Library" / "Logs" / "ClaudeCounter"
 LOG_PATH = LOG_DIRECTORY / "claudecounter.log"
@@ -66,6 +67,7 @@ class Daemon:
         attention_poll_interval: float = ATTENTION_POLL_SECONDS,
         minimum_fetch_spacing: float = MINIMUM_FETCH_SPACING_SECONDS,
         published_state_path: Path = PUBLISHED_STATE_PATH,
+        brightness_path: Path = BRIGHTNESS_PATH,
         read_usage=usage_source.read_usage,
         read_local_usage=usage_source.read_local_usage,
         a_session_is_waiting=attention.a_session_is_waiting,
@@ -82,6 +84,8 @@ class Daemon:
         self.attention_poll_interval = attention_poll_interval
         self.minimum_fetch_spacing = minimum_fetch_spacing
         self.published_state_path = published_state_path
+        self.brightness_path = brightness_path
+        self.applied_brightness: Optional[int] = None
         self.read_usage = read_usage
         self.read_local_usage = read_local_usage
         self.a_session_is_waiting = a_session_is_waiting
@@ -130,6 +134,20 @@ class Daemon:
         if self.consecutive_usage_failures:
             return self.last_snapshot.marked_stale()
         return self.last_snapshot
+
+    def wanted_brightness(self) -> Optional[int]:
+        try:
+            digits = self.brightness_path.read_text().strip()
+        except OSError:
+            return None
+        try:
+            return max(0, min(100, int(digits)))
+        except ValueError:
+            return None
+
+    def brightness_is_due(self) -> bool:
+        wanted = self.wanted_brightness()
+        return wanted is not None and wanted != self.applied_brightness
 
     def remember_trouble(self, failure: Exception) -> None:
         self.last_trouble = type(failure).__name__
@@ -249,9 +267,16 @@ class Daemon:
         snapshot = self.current_snapshot()
         self.publish_snapshot(snapshot)
         waiting = self.attention_is_wanted()
-        payloads, description = self.frames_to_send(snapshot, waiting)
+        frames, description = self.frames_to_send(snapshot, waiting)
 
-        if not self.payloads_are_due(payloads):
+        wanted = self.wanted_brightness()
+        turning_the_lamp = wanted is not None and wanted != self.applied_brightness
+        if turning_the_lamp:
+            payloads = [protocol.brightness_packet(wanted)] + frames
+            description += f", brightness {wanted}"
+        elif self.payloads_are_due(frames):
+            payloads = frames
+        else:
             self.logger.debug("frame unchanged, nothing to send")
             return True
 
@@ -261,7 +286,9 @@ class Daemon:
             self.logger.warning("could not reach the display: %s", failure)
             return False
 
-        self.last_payloads = payloads
+        if turning_the_lamp:
+            self.applied_brightness = wanted
+        self.last_payloads = frames
         self.last_sent_at = self.clock()
         self.logger.info(
             "%s, %d packet(s) and %d bytes sent", description, len(payloads), written
@@ -279,6 +306,8 @@ class Daemon:
             if self.attention_is_wanted() != known:
                 return
             if self.usage_fetch_is_due(peek_only=True):
+                return
+            if self.brightness_is_due():
                 return
 
     def run(self) -> int:
