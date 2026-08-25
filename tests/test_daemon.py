@@ -16,6 +16,7 @@ from claudecounter.daemon import (
     FORCED_RESEND_SECONDS,
     INITIAL_BACKOFF_SECONDS,
     MINIMUM_FETCH_SPACING_SECONDS,
+    STALE_AFTER_SECONDS,
 )
 from claudecounter.snapshot import UsageSnapshot
 from pathlib import Path
@@ -185,10 +186,15 @@ def a_failing_endpoint_keeps_the_last_value_and_marks_it_stale() -> None:
     states["fail"] = True
     clock.advance(60.0)
     check(daemon.tick() is True, "a failing endpoint does not count as a delivery failure")
-    check(len(display.sent) == 2, "the stale frame is pushed to the display")
+    check(
+        display.decoded() == fresh_pixels,
+        "a single failed request does not dim a reading that is a minute old",
+    )
 
+    clock.advance(STALE_AFTER_SECONDS)
+    daemon.tick()
     stale_pixels = display.decoded()
-    check(stale_pixels != fresh_pixels, "the stale frame looks different from the fresh one")
+    check(stale_pixels != fresh_pixels, "once the reading is genuinely old it is dimmed")
     check(
         renderer.dimmed(renderer.SESSION_RED) in stale_pixels
         or renderer.dimmed(renderer.SESSION_ORANGE) in stale_pixels
@@ -749,6 +755,100 @@ def the_slider_reaches_the_lamp() -> None:
     wish.unlink(missing_ok=True)
 
 
+def a_short_outage_does_not_dim_the_display() -> None:
+    print("dimming only when old")
+    states = {"fail": False}
+
+    def read_usage():
+        if states["fail"]:
+            raise usage_source.RateLimited("too many requests", retry_after=900.0)
+        return snapshot(82.0, 41.0)
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(read_usage, display, clock, resend_interval=1.0)
+    daemon.tick()
+    bright = display.decoded()
+
+    states["fail"] = True
+    reached = 0.0
+    for minutes in (1.0, 3.0, 6.0, 9.0):
+        clock.advance(minutes * 60.0 - reached)
+        reached = minutes * 60.0
+        daemon.tick()
+        check(display.decoded() == bright, f"still undimmed {int(minutes)} minute(s) in")
+
+    clock.advance(STALE_AFTER_SECONDS)
+    daemon.tick()
+    check(display.decoded() != bright, "past the age limit the reading is dimmed")
+
+    states["fail"] = False
+    clock.advance(900.0)
+    daemon.tick()
+    check(display.decoded() == bright, "a fresh reading brings the colour back")
+
+    check(
+        daemon.last_snapshot.session_pct == 82.0,
+        "the value itself never changed through any of it",
+    )
+
+
+def a_restart_keeps_the_last_known_reading() -> None:
+    print("surviving a restart")
+    from datetime import datetime, timedelta, timezone
+
+    def moments_ago(minutes: float) -> str:
+        return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+    def no_endpoint():
+        raise usage_source.RateLimited("too many requests", retry_after=900.0)
+
+    state = scratch_state_path()
+
+    def publish(fetched_at: str) -> None:
+        state.write_text(json.dumps({
+            "session_pct": 82.0,
+            "session_resets_at": "2026-08-22T20:00:00+00:00",
+            "weekly_pct": 41.0,
+            "weekly_resets_at": "2026-08-26T13:00:00+00:00",
+            "fetched_at": fetched_at,
+            "stale": False,
+            "trouble": None,
+            "written_at": fetched_at,
+        }))
+
+    publish(moments_ago(2))
+    daemon = build(no_endpoint, FakeDisplay(), FakeClock())
+    daemon.recall_published_reading()
+    check(daemon.last_snapshot is not None, "a reading from before the restart is picked up")
+    check(daemon.last_snapshot.session_pct == 82.0, "with the value intact")
+    check(daemon.reading_is_old() is False, "a two minute old reading is not dimmed")
+
+    publish(moments_ago(45))
+    middle_aged = build(no_endpoint, FakeDisplay(), FakeClock())
+    middle_aged.recall_published_reading()
+    check(middle_aged.reading_is_old() is True, "a 45 minute old one is carried over but dimmed")
+    check(
+        middle_aged.held_snapshot().session_pct == 82.0,
+        "and still shows the real number, never zero",
+    )
+
+    publish(moments_ago(60 * 30))
+    ancient = build(no_endpoint, FakeDisplay(), FakeClock())
+    ancient.recall_published_reading()
+    check(ancient.last_snapshot is None, "a reading older than a day is not resurrected")
+
+    state.write_text("{ this is not json")
+    broken = build(no_endpoint, FakeDisplay(), FakeClock())
+    broken.recall_published_reading()
+    check(broken.last_snapshot is None, "a damaged state file is ignored, not fatal")
+
+    state.write_text(json.dumps({"trouble": "ExpiredCredentials", "written_at": moments_ago(1)}))
+    troubled = build(no_endpoint, FakeDisplay(), FakeClock())
+    troubled.recall_published_reading()
+    check(troubled.last_snapshot is None, "a file without a reading carries nothing over")
+    state.unlink(missing_ok=True)
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
@@ -771,6 +871,8 @@ def main() -> int:
     the_loop_wakes_up_when_a_turn_finishes()
     the_reading_is_published_for_the_menu()
     the_slider_reaches_the_lamp()
+    a_short_outage_does_not_dim_the_display()
+    a_restart_keeps_the_last_known_reading()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

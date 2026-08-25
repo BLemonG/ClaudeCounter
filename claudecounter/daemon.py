@@ -5,6 +5,7 @@ import logging
 import logging.handlers
 import signal
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -24,6 +25,8 @@ MAXIMUM_BACKOFF_SECONDS = 300.0
 FORCED_RESEND_SECONDS = 60.0
 ATTENTION_POLL_SECONDS = 5.0
 FAILURE_HEARTBEAT_EVERY = 60
+STALE_AFTER_SECONDS = 10 * 60
+RECALL_MAX_AGE_SECONDS = 24 * 60 * 60
 
 PUBLISHED_STATE_PATH = attention.ATTENTION_DIRECTORY / "state.json"
 BRIGHTNESS_PATH = attention.ATTENTION_DIRECTORY / "brightness"
@@ -66,6 +69,7 @@ class Daemon:
         resend_interval: float = FORCED_RESEND_SECONDS,
         attention_poll_interval: float = ATTENTION_POLL_SECONDS,
         minimum_fetch_spacing: float = MINIMUM_FETCH_SPACING_SECONDS,
+        stale_after: float = STALE_AFTER_SECONDS,
         published_state_path: Path = PUBLISHED_STATE_PATH,
         brightness_path: Path = BRIGHTNESS_PATH,
         read_usage=usage_source.read_usage,
@@ -83,6 +87,7 @@ class Daemon:
         self.resend_interval = resend_interval
         self.attention_poll_interval = attention_poll_interval
         self.minimum_fetch_spacing = minimum_fetch_spacing
+        self.stale_after = stale_after
         self.published_state_path = published_state_path
         self.brightness_path = brightness_path
         self.applied_brightness: Optional[int] = None
@@ -95,6 +100,7 @@ class Daemon:
         self.clock = clock or __import__("time").monotonic
         self.stop_requested = threading.Event()
         self.last_snapshot: Optional[UsageSnapshot] = None
+        self.last_snapshot_at: Optional[float] = None
         self.last_payloads: Optional[List[bytes]] = None
         self.last_sent_at: Optional[float] = None
         self.consecutive_usage_failures = 0
@@ -128,10 +134,46 @@ class Daemon:
             return False
         return self.a_turn_asked_for_fresh_numbers(peek_only)
 
+    def age_of(self, moment: Optional[str]) -> Optional[float]:
+        parsed = renderer.parse_timestamp(moment)
+        if parsed is None:
+            return None
+        return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+
+    def recall_published_reading(self) -> None:
+        try:
+            published = json.loads(self.published_state_path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(published, dict) or "session_pct" not in published:
+            return
+        try:
+            remembered = UsageSnapshot.from_dict(published)
+        except (TypeError, ValueError):
+            return
+        age = self.age_of(remembered.fetched_at)
+        if age is None or age > RECALL_MAX_AGE_SECONDS:
+            return
+        self.remember_reading(remembered, age)
+        self.logger.info(
+            "carrying over the reading from %s, %d minute(s) old",
+            remembered.fetched_at,
+            int(age // 60),
+        )
+
+    def reading_is_old(self) -> bool:
+        if self.last_snapshot_at is None:
+            return True
+        return (self.clock() - self.last_snapshot_at) >= self.stale_after
+
+    def remember_reading(self, snapshot: UsageSnapshot, age: float = 0.0) -> None:
+        self.last_snapshot = snapshot
+        self.last_snapshot_at = self.clock() - age
+
     def held_snapshot(self) -> Optional[UsageSnapshot]:
         if self.last_snapshot is None:
             return None
-        if self.consecutive_usage_failures:
+        if self.reading_is_old():
             return self.last_snapshot.marked_stale()
         return self.last_snapshot
 
@@ -169,7 +211,7 @@ class Daemon:
         if not self.usage_fetch_is_due():
             local = self.local_snapshot()
             if local is not None:
-                self.last_snapshot = local
+                self.remember_reading(local)
                 return local
             return self.held_snapshot()
         self.last_usage_fetch_at = self.clock()
@@ -213,7 +255,7 @@ class Daemon:
             self.consecutive_usage_failures = 0
         self.last_trouble = None
         self.last_trouble_reason = None
-        self.last_snapshot = snapshot
+        self.remember_reading(snapshot)
         return snapshot
 
     def payloads_are_due(self, payloads: List[bytes]) -> bool:
@@ -311,6 +353,7 @@ class Daemon:
                 return
 
     def run(self) -> int:
+        self.recall_published_reading()
         self.logger.info(
             "starting, target %s channel %d, redrawing every %.0fs, "
             "asking the usage endpoint at most every %.0fs, "

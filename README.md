@@ -158,6 +158,12 @@ Regler schreibt den Wunsch nach
 Daemon, damit nur ein Prozess auf dem RFCOMM-Kanal sitzt. Er reist beim nächsten
 Bild mit, spätestens nach fünf Sekunden. Ohne laufenden Zähler passiert nichts.
 
+Der Wert gilt erst nach zehn Minuten als veraltet und wird dann gedimmt. Eine
+kurze Sperre des Endpunkts oder ein einzelner Fehlversuch dunkelt die Anzeige
+also nicht mehr ab. Beim Start liest der Daemon seinen letzten Stand aus
+`state.json` zurück, solange er keine 24 Stunden alt ist — ein Neustart
+verliert die Zahlen damit nicht mehr.
+
 Logdatei: `~/Library/Logs/ClaudeCounter/claudecounter.log`
 
 ## Woher die Zahlen kommen
