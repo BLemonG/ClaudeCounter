@@ -14,6 +14,7 @@ from . import protocol
 from . import render as renderer
 from . import transport
 from . import usage_source
+from . import dayhours, weekdays
 from .config import DeviceConfig
 from .snapshot import UsageSnapshot, utc_now_iso
 
@@ -30,6 +31,8 @@ RECALL_MAX_AGE_SECONDS = 24 * 60 * 60
 
 PUBLISHED_STATE_PATH = attention.ATTENTION_DIRECTORY / "state.json"
 BRIGHTNESS_PATH = attention.ATTENTION_DIRECTORY / "brightness"
+ACTIVE_DAYS_PATH = weekdays.ACTIVE_DAYS_PATH
+ACTIVE_HOURS_PATH = dayhours.ACTIVE_HOURS_PATH
 
 LOG_DIRECTORY = Path.home() / "Library" / "Logs" / "ClaudeCounter"
 LOG_PATH = LOG_DIRECTORY / "claudecounter.log"
@@ -72,6 +75,8 @@ class Daemon:
         stale_after: float = STALE_AFTER_SECONDS,
         published_state_path: Path = PUBLISHED_STATE_PATH,
         brightness_path: Path = BRIGHTNESS_PATH,
+        active_days_path: Path = ACTIVE_DAYS_PATH,
+        active_hours_path: Path = ACTIVE_HOURS_PATH,
         read_usage=usage_source.read_usage,
         read_local_usage=usage_source.read_local_usage,
         a_session_is_waiting=attention.a_session_is_waiting,
@@ -90,7 +95,11 @@ class Daemon:
         self.stale_after = stale_after
         self.published_state_path = published_state_path
         self.brightness_path = brightness_path
+        self.active_days_path = active_days_path
+        self.active_hours_path = active_hours_path
         self.applied_brightness: Optional[int] = None
+        self.drawn_active_days: Optional[frozenset] = None
+        self.drawn_active_hours = None
         self.read_usage = read_usage
         self.read_local_usage = read_local_usage
         self.a_session_is_waiting = a_session_is_waiting
@@ -191,6 +200,22 @@ class Daemon:
         wanted = self.wanted_brightness()
         return wanted is not None and wanted != self.applied_brightness
 
+    def wanted_active_days(self):
+        return weekdays.load_active_days(self.active_days_path)
+
+    def active_days_changed(self) -> bool:
+        if self.drawn_active_days is None:
+            return False
+        return self.wanted_active_days() != self.drawn_active_days
+
+    def wanted_active_hours(self):
+        return dayhours.load_active_hours(self.active_hours_path)
+
+    def active_hours_changed(self) -> bool:
+        if self.drawn_active_hours is None:
+            return False
+        return self.wanted_active_hours() != self.drawn_active_hours
+
     def remember_trouble(self, failure: Exception) -> None:
         self.last_trouble = type(failure).__name__
         self.last_trouble_reason = str(failure)
@@ -271,7 +296,13 @@ class Daemon:
         except Exception:
             return False
 
-    def frames_to_send(self, snapshot: Optional[UsageSnapshot], waiting: bool):
+    def frames_to_send(
+        self,
+        snapshot: Optional[UsageSnapshot],
+        waiting: bool,
+        active_days=None,
+        active_hours=None,
+    ):
         if snapshot is None:
             description = "no usage data, showing the unavailable frame"
             if waiting:
@@ -286,9 +317,17 @@ class Daemon:
         )
         if waiting:
             return protocol.animation_packets(
-                renderer.breathing_frames(snapshot)
+                renderer.breathing_frames(
+                    snapshot, active_days=active_days, active_hours=active_hours
+                )
             ), description + ", a session is waiting for input"
-        return [protocol.image_packet(renderer.render(snapshot))], description
+        return [
+            protocol.image_packet(
+                renderer.render(
+                    snapshot, active_days=active_days, active_hours=active_hours
+                )
+            )
+        ], description
 
     def publish_snapshot(self, snapshot: Optional[UsageSnapshot]) -> None:
         try:
@@ -309,7 +348,25 @@ class Daemon:
         snapshot = self.current_snapshot()
         self.publish_snapshot(snapshot)
         waiting = self.attention_is_wanted()
-        frames, description = self.frames_to_send(snapshot, waiting)
+        active_days = self.wanted_active_days()
+        if self.drawn_active_days is not None and active_days != self.drawn_active_days:
+            self.logger.info(
+                "the weekly marker now counts %s", weekdays.named(active_days)
+            )
+        self.drawn_active_days = active_days
+        active_hours = self.wanted_active_hours()
+        if (
+            self.drawn_active_hours is not None
+            and active_hours != self.drawn_active_hours
+        ):
+            self.logger.info(
+                "the weekly marker now counts %s of each day",
+                dayhours.spelled(active_hours),
+            )
+        self.drawn_active_hours = active_hours
+        frames, description = self.frames_to_send(
+            snapshot, waiting, active_days, active_hours
+        )
 
         wanted = self.wanted_brightness()
         turning_the_lamp = wanted is not None and wanted != self.applied_brightness
@@ -351,9 +408,24 @@ class Daemon:
                 return
             if self.brightness_is_due():
                 return
+            if self.active_days_changed():
+                return
+            if self.active_hours_changed():
+                return
 
     def run(self) -> int:
         self.recall_published_reading()
+        chosen_days = self.wanted_active_days()
+        if not weekdays.counts_every_day(chosen_days):
+            self.logger.info(
+                "the weekly marker counts %s only", weekdays.named(chosen_days)
+            )
+        chosen_hours = self.wanted_active_hours()
+        if not dayhours.covers_whole_day(chosen_hours):
+            self.logger.info(
+                "the weekly marker counts %s of each day only",
+                dayhours.spelled(chosen_hours),
+            )
         self.logger.info(
             "starting, target %s channel %d, redrawing every %.0fs, "
             "asking the usage endpoint at most every %.0fs, "

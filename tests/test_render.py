@@ -181,6 +181,82 @@ def weekly_never_uses_a_session_colour() -> None:
         check(not (row & session_colours), f"weekly row avoids session colours at {int(percent)} percent")
 
 
+def weekly_marker_can_skip_night_hours() -> None:
+    print("weekly marker with a daily hour window")
+    reset_moment = datetime(2026, 8, 31, 0, 0).astimezone()
+    week = UsageSnapshot(
+        session_pct=0.0,
+        session_resets_at=None,
+        weekly_pct=40.0,
+        weekly_resets_at=reset_moment.isoformat(),
+        fetched_at=FIXED_NOW.isoformat(),
+    )
+    week_start = reset_moment - timedelta(days=7)
+    working_days = {0, 1, 2, 3, 4}
+    morning_on = (7 * 60, 24 * 60)
+    office = (9 * 60, 18 * 60)
+
+    def fraction(days, hours, offset):
+        return renderer.weekly_elapsed_fraction(
+            week, (week_start + offset).isoformat(), days, hours
+        )
+
+    check(
+        renderer.active_seconds_between(week_start, reset_moment, None, morning_on)
+        == 7 * 17 * 60 * 60,
+        "seven days from 07:00 hold seventeen hours each",
+    )
+    check(
+        renderer.active_seconds_between(
+            week_start, reset_moment, working_days, office
+        )
+        == 5 * 9 * 60 * 60,
+        "five office days hold nine hours each",
+    )
+    check(
+        renderer.active_seconds_between(week_start, reset_moment, None, None)
+        == renderer.active_seconds_between(
+            week_start, reset_moment, None, (0, 24 * 60)
+        ),
+        "the whole day window counts the same as no window at all",
+    )
+    check(
+        fraction(None, morning_on, timedelta(hours=3)) == 0.0,
+        "nothing has passed while the night is still running",
+    )
+    check(
+        fraction(None, morning_on, timedelta(hours=3))
+        == fraction(None, morning_on, timedelta(hours=6)),
+        "the marker holds its place all through the skipped night",
+    )
+    check(
+        abs(fraction(None, morning_on, timedelta(hours=15.5)) - 0.5 / 7) < 1e-9,
+        "half of the first counted day is half of one seventh",
+    )
+    check(
+        abs(fraction(working_days, office, timedelta(days=2, hours=13.5)) - 0.5) < 1e-9,
+        "midday on Wednesday is halfway through a five day office week",
+    )
+    check(
+        fraction(working_days, office, timedelta(days=4, hours=20))
+        == fraction(working_days, office, timedelta(days=6, hours=20)),
+        "once Friday evening is over the marker stands still until the reset",
+    )
+    check(
+        renderer.weekly_marker_column(
+            fraction(working_days, office, timedelta(days=6, hours=20))
+        )
+        == renderer.SIZE - 1,
+        "a used up office week rests on the rightmost pixel",
+    )
+    friday_noon = (week_start + timedelta(days=4, hours=12)).isoformat()
+    check(
+        renderer.render(week, friday_noon, 0.0, working_days, office)
+        != renderer.render(week, friday_noon, 0.0, working_days, None),
+        "the hour window reaches the drawn frame",
+    )
+
+
 def stale_dims_data_but_keeps_the_number_readable() -> None:
     print("stale state")
     fresh = frame(82.0, 41.0, stale=False)
@@ -313,7 +389,10 @@ def weekly_marker_tracks_the_seven_day_window() -> None:
     )
 
     check(renderer.weekly_marker_column(0.0) == 0, "a fresh week marks the leftmost pixel")
-    check(renderer.weekly_marker_column(1.0) == 0, "a spent week wraps back to the leftmost pixel")
+    check(
+        renderer.weekly_marker_column(1.0) == renderer.SIZE - 1,
+        "a week with no active time left rests on the rightmost pixel",
+    )
     check(
         renderer.weekly_marker_column((renderer.SIZE - 1) / renderer.SIZE) == renderer.SIZE - 1,
         "the last slice of the week marks the rightmost pixel",
@@ -451,6 +530,118 @@ def the_marker_follows_the_clock_not_the_fetch() -> None:
     check(week_later == 0.5, "the weekly marker advances from the clock too")
 
 
+def weekly_marker_can_skip_days() -> None:
+    print("weekly marker with days switched off")
+    reset_moment = datetime(2026, 8, 31, 0, 0).astimezone()
+    week = UsageSnapshot(
+        session_pct=0.0,
+        session_resets_at=None,
+        weekly_pct=40.0,
+        weekly_resets_at=reset_moment.isoformat(),
+        fetched_at=FIXED_NOW.isoformat(),
+    )
+    week_start = reset_moment - timedelta(days=7)
+    working_days = {0, 1, 2, 3, 4}
+
+    def fraction(days, offset):
+        return renderer.weekly_elapsed_fraction(
+            week, (week_start + offset).isoformat(), days
+        )
+
+    check(
+        renderer.active_seconds_between(week_start, reset_moment, working_days)
+        == 5 * 24 * 60 * 60,
+        "five working days hold exactly five days of active time",
+    )
+    check(
+        renderer.active_seconds_between(week_start, reset_moment, None)
+        == 7 * 24 * 60 * 60,
+        "with every day switched on the whole week counts",
+    )
+    check(
+        fraction(working_days, timedelta(0)) == 0.0,
+        "the start of the week is still the start of the week",
+    )
+    check(
+        fraction(working_days, timedelta(days=2, hours=12)) == 0.5,
+        "midday on Wednesday is halfway through a five day week",
+    )
+    check(
+        fraction(None, timedelta(days=2, hours=12)) != 0.5,
+        "the same moment is not halfway when every day counts",
+    )
+
+    saturday = fraction(working_days, timedelta(days=5, hours=12))
+    sunday = fraction(working_days, timedelta(days=6, hours=20))
+    check(saturday == 1.0, "once Friday is over the working week is used up")
+    check(saturday == sunday, "the marker stands still through a skipped weekend")
+    check(
+        renderer.weekly_marker_column(saturday) == renderer.SIZE - 1,
+        "a used up working week rests on the rightmost pixel, not back at the start",
+    )
+    check(
+        fraction(None, timedelta(days=5, hours=12))
+        != fraction(None, timedelta(days=6, hours=20)),
+        "with every day switched on the marker keeps moving over the weekend",
+    )
+
+    midweek_off = {0, 1, 3, 4}
+    check(
+        fraction(midweek_off, timedelta(days=3)) == 0.5,
+        "a day off in the middle counts as no time passing",
+    )
+    check(
+        fraction(midweek_off, timedelta(days=2))
+        == fraction(midweek_off, timedelta(days=2, hours=23)),
+        "the marker holds its place all through the skipped Wednesday",
+    )
+
+    check(
+        fraction(set(), timedelta(days=2, hours=12))
+        == fraction(None, timedelta(days=2, hours=12)),
+        "switching every day off falls back to counting every day",
+    )
+    check(
+        fraction(range(7), timedelta(days=2, hours=12))
+        == fraction(None, timedelta(days=2, hours=12)),
+        "naming all seven days is the same as naming none",
+    )
+
+    moment = (week_start + timedelta(days=2, hours=12)).isoformat()
+    plain_row = renderer.render(week, moment).load()
+    working_row = renderer.render(week, moment, 0.0, working_days).load()
+    plain_marker = [
+        x
+        for x in range(renderer.SIZE)
+        if plain_row[x, renderer.WEEKLY_ROW] == renderer.TIME_MARKER
+    ]
+    working_marker = [
+        x
+        for x in range(renderer.SIZE)
+        if working_row[x, renderer.WEEKLY_ROW] == renderer.TIME_MARKER
+    ]
+    check(len(working_marker) == 1, "the drawn frame still carries exactly one marker")
+    check(
+        working_marker[0] == renderer.weekly_marker_column(0.5),
+        "the drawn marker sits where the working week says",
+    )
+    check(
+        plain_marker != working_marker,
+        "switching the weekend off actually moves the drawn marker",
+    )
+
+    beside_the_marker = [
+        x for x in range(renderer.SIZE) if x not in (plain_marker[0], working_marker[0])
+    ]
+    check(
+        all(
+            plain_row[x, renderer.WEEKLY_ROW] == working_row[x, renderer.WEEKLY_ROW]
+            for x in beside_the_marker
+        ),
+        "away from the marker the weekly bar is untouched by the setting",
+    )
+
+
 def main() -> int:
     ring_is_disjoint_from_weekly_row()
     ring_fill_tracks_percentage()
@@ -460,6 +651,8 @@ def main() -> int:
     weekly_never_uses_a_session_colour()
     time_marker_tracks_the_session_window()
     weekly_marker_tracks_the_seven_day_window()
+    weekly_marker_can_skip_days()
+    weekly_marker_can_skip_night_hours()
     stale_dims_data_but_keeps_the_number_readable()
     both_values_are_visible_at_once()
     palette_stays_small_enough_for_one_packet()

@@ -12,6 +12,7 @@ from . import render as renderer
 from . import transport
 from . import daemon as daemon_module
 from . import usage_source
+from . import dayhours, weekdays
 from .config import DEFAULT_RFCOMM_CHANNEL, DeviceConfig, load_config, save_config
 from .snapshot import UsageSnapshot, utc_now_iso
 
@@ -42,6 +43,20 @@ def snapshot_from_args(args: argparse.Namespace) -> UsageSnapshot:
     )
 
 
+def chosen_days(args: argparse.Namespace):
+    named = getattr(args, "weekdays", None)
+    if named:
+        return weekdays.days_from_names(named)
+    return weekdays.load_active_days()
+
+
+def chosen_hours(args: argparse.Namespace):
+    wanted = getattr(args, "hours", None)
+    if wanted:
+        return dayhours.hours_from_text(wanted)
+    return dayhours.load_active_hours()
+
+
 def default_preview_path(args: argparse.Namespace) -> str:
     suffix = "-stale" if args.stale else ""
     return f"preview-session{int(round(args.session))}-weekly{int(round(args.weekly))}{suffix}.png"
@@ -65,7 +80,15 @@ def resolve_target(args: argparse.Namespace) -> Optional[DeviceConfig]:
 
 def cmd_preview(args: argparse.Namespace) -> int:
     snapshot = snapshot_from_args(args)
-    image = renderer.render(snapshot)
+    days = chosen_days(args)
+    if days is None:
+        print(f"unknown weekday in {args.weekdays!r}", file=sys.stderr)
+        return 1
+    hours = chosen_hours(args)
+    if hours is None:
+        print(f"unreadable hour window in {args.hours!r}", file=sys.stderr)
+        return 1
+    image = renderer.render(snapshot, active_days=days, active_hours=hours)
     if args.ascii:
         print(renderer.ascii_art(image))
     scale = max(args.scale, MINIMUM_PREVIEW_SCALE)
@@ -144,13 +167,23 @@ def cmd_send(args: argparse.Namespace) -> int:
     if target is None:
         return 1
     snapshot = snapshot_from_args(args)
+    days = chosen_days(args)
+    if days is None:
+        print(f"unknown weekday in {args.weekdays!r}", file=sys.stderr)
+        return 1
+    hours = chosen_hours(args)
+    if hours is None:
+        print(f"unreadable hour window in {args.hours!r}", file=sys.stderr)
+        return 1
     label = f"session={int(round(args.session))} weekly={int(round(args.weekly))}"
     if args.breathing:
-        frames = renderer.breathing_frames(snapshot)
+        frames = renderer.breathing_frames(
+            snapshot, active_days=days, active_hours=hours
+        )
         if args.ascii:
             print(renderer.ascii_art(frames[len(frames) // 2][0]))
         return deliver(target, protocol.animation_packets(frames), label + " breathing")
-    image = renderer.render(snapshot)
+    image = renderer.render(snapshot, active_days=days, active_hours=hours)
     if args.ascii:
         print(renderer.ascii_art(image))
     return deliver(target, protocol.image_packet(image), label)
@@ -218,6 +251,50 @@ def cmd_brightness(args: argparse.Namespace) -> int:
     return deliver(target, protocol.brightness_packet(args.level), f"brightness {args.level}")
 
 
+def cmd_weekdays(args: argparse.Namespace) -> int:
+    if args.every_day:
+        wanted = weekdays.EVERY_DAY
+    elif args.set:
+        wanted = weekdays.days_from_names(args.set)
+        if wanted is None:
+            print(
+                f"unknown weekday in {args.set!r}, "
+                f"use names from {','.join(weekdays.DAY_NAMES)}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        stored = weekdays.load_active_days()
+        print(f"the weekly time marker counts {weekdays.named(stored)}")
+        return 0
+    path = weekdays.save_active_days(wanted)
+    print(f"the weekly time marker now counts {weekdays.named(wanted)}")
+    print(f"wrote {path}")
+    return 0
+
+
+def cmd_hours(args: argparse.Namespace) -> int:
+    if args.all_day:
+        wanted = dayhours.WHOLE_DAY
+    elif args.set:
+        wanted = dayhours.hours_from_text(args.set)
+        if wanted is None:
+            print(
+                f"unreadable hour window in {args.set!r}, "
+                "use a span like 07:00-24:00",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        stored = dayhours.load_active_hours()
+        print(f"the weekly time marker counts {dayhours.spelled(stored)} of each day")
+        return 0
+    path = dayhours.save_active_hours(wanted)
+    print(f"the weekly time marker now counts {dayhours.spelled(wanted)} of each day")
+    print(f"wrote {path}")
+    return 0
+
+
 def cmd_usage(args: argparse.Namespace) -> int:
     try:
         if args.raw:
@@ -263,6 +340,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="hours until the 7d window resets, drives the time marker on the weekly bar",
     )
+    preview.add_argument(
+        "--weekdays",
+        help="weekdays the weekly time marker counts, defaults to the stored choice",
+    )
+    preview.add_argument(
+        "--hours",
+        help="hours of a day the weekly time marker counts, for example 07:00-24:00",
+    )
     preview.add_argument("--scale", type=int, default=MINIMUM_PREVIEW_SCALE, help="pixel scale factor")
     preview.add_argument("--ascii", action="store_true", help="also print the frame as text")
     preview.add_argument("-o", "--output", help="output PNG path")
@@ -294,6 +379,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="hours until the 7d window resets, drives the time marker on the weekly bar",
     )
+    send.add_argument(
+        "--weekdays",
+        help="weekdays the weekly time marker counts, defaults to the stored choice",
+    )
+    send.add_argument(
+        "--hours",
+        help="hours of a day the weekly time marker counts, for example 07:00-24:00",
+    )
     send.add_argument("--ascii", action="store_true", help="also print the frame as text")
     send.add_argument(
         "--breathing",
@@ -313,6 +406,32 @@ def build_parser() -> argparse.ArgumentParser:
     brightness.add_argument("--level", type=int, required=True, help="brightness from 0 to 100")
     add_target_arguments(brightness)
     brightness.set_defaults(func=cmd_brightness)
+
+    weekday_choice = subcommands.add_parser(
+        "weekdays",
+        help="choose which weekdays the time marker on the weekly bar counts",
+    )
+    weekday_choice.add_argument(
+        "--set",
+        help=f"comma separated weekdays, for example {','.join(weekdays.DAY_NAMES[:5])}",
+    )
+    weekday_choice.add_argument(
+        "--every-day", action="store_true", help="count all seven days again"
+    )
+    weekday_choice.set_defaults(func=cmd_weekdays)
+
+    hour_choice = subcommands.add_parser(
+        "hours",
+        help="choose which hours of a day the time marker on the weekly bar counts",
+    )
+    hour_choice.add_argument(
+        "--set",
+        help="hour span, for example 07:00-24:00",
+    )
+    hour_choice.add_argument(
+        "--all-day", action="store_true", help="count every hour again"
+    )
+    hour_choice.set_defaults(func=cmd_hours)
 
     usage = subcommands.add_parser("usage", help="read the current usage from the Anthropic endpoint")
     usage.add_argument("--raw", action="store_true", help="print the untouched endpoint response")

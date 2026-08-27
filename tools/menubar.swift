@@ -13,7 +13,97 @@ let stateFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/ClaudeCounter/state.json")
 let brightnessFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/ClaudeCounter/brightness")
+let weekdaysFile = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/ClaudeCounter/weekdays")
+let dayhoursFile = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/ClaudeCounter/dayhours")
 let defaultBrightness = 50
+let minutesPerDay = 24 * 60
+let weekdayNames = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+let everyDay: Set<Int> = Set(0...6)
+
+func activeDays() -> Set<Int> {
+    guard let text = try? String(contentsOf: weekdaysFile, encoding: .utf8) else { return everyDay }
+    let marks = Array(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    guard marks.count == 7, marks.allSatisfy({ $0 == "0" || $0 == "1" }) else { return everyDay }
+    let chosen = Set(marks.indices.filter { marks[$0] == "1" })
+    return chosen.isEmpty ? everyDay : chosen
+}
+
+func writeActiveDays(_ days: Set<Int>) {
+    let chosen = days.isEmpty ? everyDay : days
+    let marks = (0..<7).map { chosen.contains($0) ? "1" : "0" }.joined()
+    try? FileManager.default.createDirectory(
+        at: weekdaysFile.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try? marks.write(to: weekdaysFile, atomically: true, encoding: .utf8)
+}
+
+func spokenDays(_ days: Set<Int>) -> String {
+    if days == everyDay { return "alle Tage" }
+    if days == Set(0...4) { return "Mo–Fr" }
+    return (0..<7).filter { days.contains($0) }.map { weekdayNames[$0] }.joined(separator: ", ")
+}
+
+struct HourWindow: Equatable {
+    let opens: Int
+    let shuts: Int
+}
+
+let wholeDay = HourWindow(opens: 0, shuts: minutesPerDay)
+
+func spelledClock(_ minutes: Int) -> String {
+    return String(format: "%02d:%02d", minutes / 60, minutes % 60)
+}
+
+func minutesFromClock(_ text: String) -> Int? {
+    let pieces = text.trimmingCharacters(in: .whitespaces).split(separator: ":")
+    guard pieces.count == 2, let hours = Int(pieces[0]), let minutes = Int(pieces[1])
+    else { return nil }
+    let total = hours * 60 + minutes
+    guard total >= 0, total <= minutesPerDay else { return nil }
+    return total
+}
+
+func hourWindowFrom(_ text: String) -> HourWindow? {
+    let pieces = text.replacingOccurrences(of: "\u{2013}", with: "-").split(separator: "-")
+    guard pieces.count == 2,
+          let opens = minutesFromClock(String(pieces[0])),
+          let shuts = minutesFromClock(String(pieces[1])),
+          opens < shuts
+    else { return nil }
+    return HourWindow(opens: opens, shuts: shuts)
+}
+
+func activeHours() -> HourWindow {
+    guard let text = try? String(contentsOf: dayhoursFile, encoding: .utf8) else { return wholeDay }
+    return hourWindowFrom(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? wholeDay
+}
+
+func writeActiveHours(_ hours: HourWindow) {
+    try? FileManager.default.createDirectory(
+        at: dayhoursFile.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    let spelled = spelledClock(hours.opens) + "-" + spelledClock(hours.shuts) + "\n"
+    try? spelled.write(to: dayhoursFile, atomically: true, encoding: .utf8)
+}
+
+let hourPresets: [HourWindow] = [
+    wholeDay,
+    HourWindow(opens: 6 * 60, shuts: minutesPerDay),
+    HourWindow(opens: 7 * 60, shuts: minutesPerDay),
+    HourWindow(opens: 8 * 60, shuts: minutesPerDay),
+    HourWindow(opens: 7 * 60, shuts: 22 * 60),
+    HourWindow(opens: 9 * 60, shuts: 18 * 60),
+]
+
+func spokenHours(_ hours: HourWindow) -> String {
+    if hours == wholeDay { return "ganzer Tag" }
+    if hours.shuts == minutesPerDay { return "ab \(spelledClock(hours.opens))" }
+    return "\(spelledClock(hours.opens))\u{2013}\(spelledClock(hours.shuts))"
+}
 
 func wantedBrightness() -> Int {
     guard let text = try? String(contentsOf: brightnessFile, encoding: .utf8),
@@ -76,6 +166,7 @@ struct Reading {
     let stale: Bool
     let moment: String
     let sessionResetsAt: Date?
+    let weeklyResetsAt: Date?
 }
 
 func momentFrom(_ value: Any?) -> Date? {
@@ -111,7 +202,8 @@ func publishedState() -> PublishedState? {
             weekly: weekly,
             stale: (root["stale"] as? Bool) ?? false,
             moment: clockText(momentFrom(root["fetched_at"]), "HH:mm:ss") ?? "",
-            sessionResetsAt: momentFrom(root["session_resets_at"])
+            sessionResetsAt: momentFrom(root["session_resets_at"]),
+            weeklyResetsAt: momentFrom(root["weekly_resets_at"])
         )
     }
     return PublishedState(
@@ -170,7 +262,8 @@ func loggedReading() -> Reading? {
         weekly: weekly,
         stale: !piece(5).isEmpty,
         moment: piece(2),
-        sessionResetsAt: nil
+        sessionResetsAt: nil,
+        weeklyResetsAt: nil
     )
 }
 
@@ -349,6 +442,62 @@ func elapsedFraction(_ resetsAt: Date?, _ window: TimeInterval) -> Double? {
     return elapsed / window
 }
 
+let weeklyWindow: TimeInterval = 7 * 24 * 60 * 60
+
+func mondayBasedWeekday(_ moment: Date) -> Int {
+    return (Calendar.current.component(.weekday, from: moment) + 5) % 7
+}
+
+func nextLocalMidnight(_ moment: Date) -> Date? {
+    let calendar = Calendar.current
+    guard let tomorrow = calendar.date(
+        byAdding: .day, value: 1, to: calendar.startOfDay(for: moment)
+    ) else { return nil }
+    return calendar.startOfDay(for: tomorrow)
+}
+
+func localDayOpening(_ moment: Date, _ minutes: Int) -> Date {
+    let calendar = Calendar.current
+    let midnight = calendar.startOfDay(for: moment)
+    if minutes >= minutesPerDay {
+        return nextLocalMidnight(moment) ?? midnight.addingTimeInterval(TimeInterval(minutes * 60))
+    }
+    return calendar.date(
+        bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: midnight
+    ) ?? midnight.addingTimeInterval(TimeInterval(minutes * 60))
+}
+
+func activeSecondsBetween(
+    _ start: Date, _ end: Date, _ days: Set<Int>, _ hours: HourWindow
+) -> TimeInterval {
+    var cursor = start
+    var counted: TimeInterval = 0
+    while cursor < end {
+        guard let boundary = nextLocalMidnight(cursor), boundary > cursor else { break }
+        let segmentEnd = min(boundary, end)
+        if days.contains(mondayBasedWeekday(cursor)) {
+            let opens = localDayOpening(cursor, hours.opens)
+            let shuts = localDayOpening(cursor, hours.shuts)
+            counted += max(0, min(segmentEnd, shuts).timeIntervalSince(max(cursor, opens)))
+        }
+        cursor = segmentEnd
+    }
+    return counted
+}
+
+func weeklyElapsedFraction(
+    _ resetsAt: Date?, _ days: Set<Int>, _ hours: HourWindow
+) -> Double? {
+    guard let passingTime = elapsedFraction(resetsAt, weeklyWindow) else { return nil }
+    if days == everyDay && hours == wholeDay { return passingTime }
+    let now = Date()
+    let windowStart = now.addingTimeInterval(-passingTime * weeklyWindow)
+    let windowEnd = windowStart.addingTimeInterval(weeklyWindow)
+    let wholeWindow = activeSecondsBetween(windowStart, windowEnd, days, hours)
+    guard wholeWindow > 0 else { return passingTime }
+    return min(1.0, activeSecondsBetween(windowStart, now, days, hours) / wholeWindow)
+}
+
 func sessionColor(_ percent: Double) -> NSColor {
     if percent < 60.0 { return sessionGreen }
     if percent < 80.0 { return sessionYellow }
@@ -501,6 +650,16 @@ final class MenuController: NSObject, NSMenuDelegate {
                     "blauer Punkt: \(Int((elapsed * 100).rounded())) % der 5 Stunden um, frei um \(at) Uhr"
                 ))
             }
+            if let weeklyResets = reading.weeklyResetsAt {
+                let days = activeDays()
+                let hours = activeHours()
+                let passed = weeklyElapsedFraction(weeklyResets, days, hours) ?? 0.0
+                let narrowed = days != everyDay || hours != wholeDay
+                let scope = narrowed ? "der gewählten Zeit" : "der Woche"
+                menu.addItem(disabled(
+                    "blauer Punkt Woche: \(Int((passed * 100).rounded())) % \(scope) um"
+                ))
+            }
         } else {
             menu.addItem(disabled("noch kein Messwert"))
         }
@@ -522,6 +681,8 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(action(counterRuns ? "Zähler stoppen" : "Zähler starten", #selector(toggleCounter)))
         menu.addItem(action("Anzeige jetzt auffrischen", #selector(askForRefresh)))
         menu.addItem(brightnessRow(counterRuns))
+        menu.addItem(weekdayChoice())
+        menu.addItem(hourChoice())
         menu.addItem(.separator())
 
         let guardRuns = serviceIsLoaded(audioGuardLabel)
@@ -558,6 +719,94 @@ final class MenuController: NSObject, NSMenuDelegate {
         let entry = NSMenuItem()
         entry.view = row
         return entry
+    }
+
+    private func weekdayChoice() -> NSMenuItem {
+        let chosen = activeDays()
+        let days = NSMenu()
+        days.autoenablesItems = false
+        for day in 0..<7 {
+            let entry = NSMenuItem(
+                title: weekdayNames[day],
+                action: #selector(toggleWeekday(_:)),
+                keyEquivalent: ""
+            )
+            entry.target = self
+            entry.tag = day
+            entry.state = chosen.contains(day) ? .on : .off
+            entry.isEnabled = !(chosen.count == 1 && chosen.contains(day))
+            days.addItem(entry)
+        }
+        days.addItem(.separator())
+        let everything = NSMenuItem(
+            title: "Alle Tage zählen",
+            action: #selector(countEveryDay),
+            keyEquivalent: ""
+        )
+        everything.target = self
+        everything.isEnabled = chosen != everyDay
+        days.addItem(everything)
+
+        let entry = NSMenuItem(
+            title: "Wochenpunkt zählt: \(spokenDays(chosen))",
+            action: nil,
+            keyEquivalent: ""
+        )
+        entry.submenu = days
+        return entry
+    }
+
+    private func hourChoice() -> NSMenuItem {
+        let chosen = activeHours()
+        let spans = NSMenu()
+        spans.autoenablesItems = false
+        for preset in hourPresets {
+            let entry = NSMenuItem(
+                title: spokenHours(preset),
+                action: #selector(pickHours(_:)),
+                keyEquivalent: ""
+            )
+            entry.target = self
+            entry.tag = preset.opens * 10000 + preset.shuts
+            entry.state = preset == chosen ? .on : .off
+            spans.addItem(entry)
+        }
+        if !hourPresets.contains(chosen) {
+            spans.addItem(.separator())
+            let current = NSMenuItem(title: spokenHours(chosen), action: nil, keyEquivalent: "")
+            current.state = .on
+            current.isEnabled = false
+            spans.addItem(current)
+        }
+
+        let entry = NSMenuItem(
+            title: "Wochenpunkt zählt Stunden: \(spokenHours(chosen))",
+            action: nil,
+            keyEquivalent: ""
+        )
+        entry.submenu = spans
+        return entry
+    }
+
+    @objc private func pickHours(_ sender: NSMenuItem) {
+        writeActiveHours(
+            HourWindow(opens: sender.tag / 10000, shuts: sender.tag % 10000)
+        )
+    }
+
+    @objc private func toggleWeekday(_ sender: NSMenuItem) {
+        var chosen = activeDays()
+        if chosen.contains(sender.tag) {
+            guard chosen.count > 1 else { return }
+            chosen.remove(sender.tag)
+        } else {
+            chosen.insert(sender.tag)
+        }
+        writeActiveDays(chosen)
+    }
+
+    @objc private func countEveryDay() {
+        writeActiveDays(everyDay)
     }
 
     @objc private func brightnessMoved(_ slider: NSSlider) {

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, time, timedelta, timezone
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from PIL import Image
 
+from . import dayhours, weekdays
 from .snapshot import UsageSnapshot, utc_now_iso
 
 SIZE = 16
@@ -325,16 +326,80 @@ def draw_session_label(pixels, percent: float, stale: bool) -> None:
     draw_text(pixels, session_label(percent), LABEL)
 
 
+def next_local_midnight(moment: float) -> float:
+    local = datetime.fromtimestamp(moment)
+    tomorrow = datetime.combine(local.date() + timedelta(days=1), time.min)
+    return tomorrow.timestamp()
+
+
+def local_day_opening(moment: float, minutes: int) -> float:
+    local = datetime.fromtimestamp(moment)
+    midnight = datetime.combine(local.date(), time.min)
+    return (midnight + timedelta(minutes=minutes)).timestamp()
+
+
+def active_seconds_between(
+    start: datetime,
+    end: datetime,
+    active_days: Optional[Iterable[int]],
+    active_hours: Optional[Sequence[int]] = None,
+) -> float:
+    chosen = weekdays.normalized(active_days)
+    opens, shuts = dayhours.normalized(active_hours)
+    cursor = start.timestamp()
+    finish = end.timestamp()
+    counted = 0.0
+    while cursor < finish:
+        boundary = next_local_midnight(cursor)
+        if boundary <= cursor:
+            break
+        segment_end = min(boundary, finish)
+        if datetime.fromtimestamp(cursor).weekday() in chosen:
+            day_opens = local_day_opening(cursor, opens)
+            day_shuts = local_day_opening(cursor, shuts)
+            counted += max(
+                0.0, min(segment_end, day_shuts) - max(cursor, day_opens)
+            )
+        cursor = segment_end
+    return counted
+
+
 def weekly_elapsed_fraction(
-    snapshot: UsageSnapshot, now: Optional[str] = None
+    snapshot: UsageSnapshot,
+    now: Optional[str] = None,
+    active_days: Optional[Iterable[int]] = None,
+    active_hours: Optional[Sequence[int]] = None,
 ) -> Optional[float]:
-    return elapsed_fraction(
-        snapshot.weekly_resets_at, now or utc_now_iso(), WEEKLY_WINDOW_SECONDS
+    reference_text = now or utc_now_iso()
+    passing_time = elapsed_fraction(
+        snapshot.weekly_resets_at, reference_text, WEEKLY_WINDOW_SECONDS
     )
+    if passing_time is None:
+        return None
+    if weekdays.counts_every_day(active_days) and dayhours.covers_whole_day(
+        active_hours
+    ):
+        return passing_time
+    reference = parse_timestamp(reference_text)
+    if reference is None:
+        return passing_time
+    window_start = reference - timedelta(
+        seconds=passing_time * WEEKLY_WINDOW_SECONDS
+    )
+    window_end = window_start + timedelta(seconds=WEEKLY_WINDOW_SECONDS)
+    active_in_window = active_seconds_between(
+        window_start, window_end, active_days, active_hours
+    )
+    if active_in_window <= 0.0:
+        return passing_time
+    active_so_far = active_seconds_between(
+        window_start, reference, active_days, active_hours
+    )
+    return min(1.0, active_so_far / active_in_window)
 
 
 def weekly_marker_column(fraction: float) -> int:
-    return int(fraction * SIZE) % SIZE
+    return min(int(fraction * SIZE), SIZE - 1)
 
 
 def draw_weekly_bar(pixels, percent: float, stale: bool) -> None:
@@ -350,7 +415,11 @@ def draw_weekly_marker(pixels, fraction: float, stale: bool) -> None:
 
 
 def render(
-    snapshot: UsageSnapshot, now: Optional[str] = None, attention: float = 0.0
+    snapshot: UsageSnapshot,
+    now: Optional[str] = None,
+    attention: float = 0.0,
+    active_days: Optional[Iterable[int]] = None,
+    active_hours: Optional[Sequence[int]] = None,
 ) -> Image.Image:
     reference = now or utc_now_iso()
     session = clamp_percent(snapshot.session_pct)
@@ -364,7 +433,9 @@ def render(
         draw_time_marker(pixels, elapsed, snapshot.stale)
     draw_session_label(pixels, session, snapshot.stale)
     draw_weekly_bar(pixels, weekly, snapshot.stale)
-    weekly_elapsed = weekly_elapsed_fraction(snapshot, reference)
+    weekly_elapsed = weekly_elapsed_fraction(
+        snapshot, reference, active_days, active_hours
+    )
     if weekly_elapsed is not None:
         draw_weekly_marker(pixels, weekly_elapsed, snapshot.stale)
     return image
@@ -383,11 +454,17 @@ def render_unavailable(attention: float = 0.0) -> Image.Image:
 
 
 def breathing_frames(
-    snapshot: UsageSnapshot, now: Optional[str] = None
+    snapshot: UsageSnapshot,
+    now: Optional[str] = None,
+    active_days: Optional[Iterable[int]] = None,
+    active_hours: Optional[Sequence[int]] = None,
 ) -> List[Tuple[Image.Image, int]]:
     reference = now or utc_now_iso()
     return [
-        (render(snapshot, reference, level), BREATH_FRAME_MILLISECONDS)
+        (
+            render(snapshot, reference, level, active_days, active_hours),
+            BREATH_FRAME_MILLISECONDS,
+        )
         for level in breath_levels()
     ]
 

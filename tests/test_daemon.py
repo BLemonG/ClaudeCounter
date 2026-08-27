@@ -8,7 +8,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from datetime import datetime, timedelta, timezone
+
 from claudecounter import protocol, transport, usage_source
+from claudecounter import dayhours, weekdays
 from claudecounter import render as renderer
 from claudecounter.config import DeviceConfig
 from claudecounter.daemon import (
@@ -34,6 +37,14 @@ def scratch_state_path():
 
 def scratch_brightness_path():
     return Path(SCRATCH.name) / "brightness"
+
+
+def scratch_weekdays_path():
+    return Path(SCRATCH.name) / "weekdays"
+
+
+def scratch_dayhours_path():
+    return Path(SCRATCH.name) / "dayhours"
 
 
 def check(condition: bool, description: str) -> None:
@@ -118,6 +129,8 @@ def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
         quiet_logger(),
         published_state_path=scratch_state_path(),
         brightness_path=scratch_brightness_path(),
+        active_days_path=scratch_weekdays_path(),
+        active_hours_path=scratch_dayhours_path(),
         poll_interval=60.0,
         usage_fetch_interval=usage_fetch_interval,
         resend_interval=resend_interval,
@@ -849,6 +862,188 @@ def a_restart_keeps_the_last_known_reading() -> None:
     state.unlink(missing_ok=True)
 
 
+WORKING_DAYS = frozenset({0, 1, 2, 3, 4})
+
+
+def a_week_where_the_weekend_matters():
+    reference = datetime.now(timezone.utc)
+    now = reference.isoformat()
+    for hours in range(1, 169):
+        resets_at = (reference + timedelta(hours=hours)).isoformat()
+        probe = UsageSnapshot(
+            session_pct=50.0,
+            session_resets_at=None,
+            weekly_pct=40.0,
+            weekly_resets_at=resets_at,
+            fetched_at=now,
+        )
+        every_day = renderer.weekly_marker_column(
+            renderer.weekly_elapsed_fraction(probe, now, None)
+        )
+        working = renderer.weekly_marker_column(
+            renderer.weekly_elapsed_fraction(probe, now, WORKING_DAYS)
+        )
+        if every_day != working:
+            return resets_at
+    return None
+
+
+def the_weekday_setting_reaches_the_marker() -> None:
+    print("weekly marker weekdays")
+    wish = scratch_weekdays_path()
+    wish.unlink(missing_ok=True)
+
+    resets_at = a_week_where_the_weekend_matters()
+    check(
+        resets_at is not None,
+        "there is a week in which switching the weekend off moves the marker",
+    )
+    reading = UsageSnapshot(
+        session_pct=50.0,
+        session_resets_at=None,
+        weekly_pct=40.0,
+        weekly_resets_at=resets_at,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: reading, display, clock, resend_interval=600.0)
+    check(
+        daemon.wanted_active_days() == weekdays.EVERY_DAY,
+        "without a file every day counts",
+    )
+    daemon.tick()
+    every_day = display.decoded()
+
+    wish.write_text("1111100\n")
+    check(
+        daemon.wanted_active_days() == WORKING_DAYS,
+        "the file names the working days",
+    )
+    check(daemon.active_days_changed() is True, "a new choice wakes the loop early")
+    daemon.tick()
+    working_week = display.decoded()
+    check(working_week != every_day, "switching the weekend off changes the picture")
+    check(daemon.active_days_changed() is False, "and then stops waking it")
+
+    before = len(display.sent)
+    daemon.tick()
+    check(len(display.sent) == before, "an unchanged choice is not sent again")
+
+    wish.write_text("nonsense")
+    daemon.tick()
+    check(
+        display.decoded() == every_day,
+        "a damaged file falls back to counting every day",
+    )
+
+    wish.write_text("0000000\n")
+    daemon.tick()
+    check(
+        display.decoded() == every_day,
+        "switching every day off falls back too, the marker never disappears",
+    )
+
+    wish.write_text("1111100\n")
+    daemon.tick()
+    check(
+        display.decoded() == working_week,
+        "choosing the working days again restores the picture",
+    )
+    wish.unlink(missing_ok=True)
+
+
+MORNING_ON = (7 * 60, 24 * 60)
+
+
+def a_week_where_the_night_matters():
+    reference = datetime.now(timezone.utc)
+    now = reference.isoformat()
+    for hours in range(1, 169):
+        resets_at = (reference + timedelta(hours=hours)).isoformat()
+        probe = UsageSnapshot(
+            session_pct=50.0,
+            session_resets_at=None,
+            weekly_pct=40.0,
+            weekly_resets_at=resets_at,
+            fetched_at=now,
+        )
+        whole_day = renderer.weekly_marker_column(
+            renderer.weekly_elapsed_fraction(probe, now, None, None)
+        )
+        mornings = renderer.weekly_marker_column(
+            renderer.weekly_elapsed_fraction(probe, now, None, MORNING_ON)
+        )
+        if whole_day != mornings:
+            return resets_at
+    return None
+
+
+def the_day_hours_setting_reaches_the_marker() -> None:
+    print("weekly marker day hours")
+    wish = scratch_dayhours_path()
+    wish.unlink(missing_ok=True)
+
+    resets_at = a_week_where_the_night_matters()
+    check(
+        resets_at is not None,
+        "there is a week in which skipping the nights moves the marker",
+    )
+    reading = UsageSnapshot(
+        session_pct=50.0,
+        session_resets_at=None,
+        weekly_pct=40.0,
+        weekly_resets_at=resets_at,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: reading, display, clock, resend_interval=600.0)
+    check(
+        daemon.wanted_active_hours() == dayhours.WHOLE_DAY,
+        "without a file the whole day counts",
+    )
+    daemon.tick()
+    whole_day = display.decoded()
+
+    wish.write_text("07:00-24:00\n")
+    check(
+        daemon.wanted_active_hours() == MORNING_ON,
+        "the file names the counted hours",
+    )
+    check(daemon.active_hours_changed() is True, "a new span wakes the loop early")
+    daemon.tick()
+    mornings = display.decoded()
+    check(mornings != whole_day, "skipping the nights changes the picture")
+    check(daemon.active_hours_changed() is False, "and then stops waking it")
+
+    before = len(display.sent)
+    daemon.tick()
+    check(len(display.sent) == before, "an unchanged span is not sent again")
+
+    wish.write_text("nonsense")
+    daemon.tick()
+    check(
+        display.decoded() == whole_day,
+        "a damaged file falls back to counting the whole day",
+    )
+
+    wish.write_text("18:00-09:00\n")
+    daemon.tick()
+    check(
+        display.decoded() == whole_day,
+        "a span that ends before it starts falls back too",
+    )
+
+    wish.write_text("07:00-24:00\n")
+    daemon.tick()
+    check(
+        display.decoded() == mornings,
+        "choosing the mornings again restores the picture",
+    )
+    wish.unlink(missing_ok=True)
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
@@ -873,6 +1068,8 @@ def main() -> int:
     the_slider_reaches_the_lamp()
     a_short_outage_does_not_dim_the_display()
     a_restart_keeps_the_last_known_reading()
+    the_weekday_setting_reaches_the_marker()
+    the_day_hours_setting_reaches_the_marker()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

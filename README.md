@@ -24,6 +24,15 @@ Von links: ruhig · mittel · knapp · kritisch · veraltet (gedimmt) · keine D
 Der cyane Punkt folgt der Uhr, nicht dem Zeitpunkt der Messung. Ein Ringpixel
 entspricht rund 5,2 Minuten, ein Pixel der Wochenzeile rund 10,5 Stunden.
 
+Der Punkt in der Wochenzeile muss nicht jeden Tag mitzählen. Wer am Wochenende
+nichts macht, stellt ihn auf Montag bis Freitag; dann steht er samstags und
+sonntags still und läuft dem violetten Balken nicht mehr davon. Siehe
+[Welche Tage der Wochenpunkt zählt](#welche-tage-der-wochenpunkt-zählt).
+
+Genauso muss er nicht die ganze Nacht mitzählen. Wer erst ab sieben Uhr
+anfängt, lässt ihn die Stunden davor überspringen; siehe
+[Welche Stunden der Wochenpunkt zählt](#welche-stunden-der-wochenpunkt-zählt).
+
 Es wird **nie** 0 % angezeigt, wenn in Wahrheit nur die Datenquelle fehlt.
 
 ## Voraussetzungen
@@ -116,6 +125,11 @@ Der Mauszeiger auf dem Ring zeigt Sitzung und Woche als Kurzhinweis. Ein Klick
 - Tonschutz starten oder stoppen
 - Protokoll öffnen
 
+Darunter steht, wie weit der cyane Punkt in der Woche ist, ein Untermenü
+`Wochenpunkt zählt: …`, in dem sich einzelne Wochentage an- und abschalten
+lassen, und ein Untermenü `Wochenpunkt zählt Stunden: …` mit den üblichen
+Zeitfenstern eines Tages.
+
 Das Menü lässt sich auch einzeln starten, per Doppelklick auf
 `claudecounter/bin/ClaudeCounterMenu.app` oder mit
 
@@ -146,6 +160,12 @@ python3 -m claudecounter daemon --verbose                           # im Vorderg
 python3 -m claudecounter send --session 63 --weekly 29 --breathing  # Atmen testen
 python3 -m claudecounter waiting                                    # wer wartet gerade
 python3 -m claudecounter waiting --clear                            # Atmen abwürgen
+python3 -m claudecounter weekdays                                   # welche Tage zählen
+python3 -m claudecounter weekdays --set mon,tue,wed,thu,fri         # Wochenende raus
+python3 -m claudecounter weekdays --every-day                       # wieder alle sieben
+python3 -m claudecounter hours                                      # welche Stunden zählen
+python3 -m claudecounter hours --set 07:00-24:00                    # Nächte raus
+python3 -m claudecounter hours --all-day                            # wieder rund um die Uhr
 ```
 
 `preview` und `send` nehmen zusätzlich `--stale`, `--session-resets-in <Minuten>`
@@ -157,6 +177,52 @@ Regler schreibt den Wunsch nach
 `~/Library/Application Support/ClaudeCounter/brightness`; gesendet wird er vom
 Daemon, damit nur ein Prozess auf dem RFCOMM-Kanal sitzt. Er reist beim nächsten
 Bild mit, spätestens nach fünf Sekunden. Ohne laufenden Zähler passiert nichts.
+
+### Welche Tage der Wochenpunkt zählt
+
+Der cyane Punkt in der Wochenzeile läuft normalerweise über alle sieben Tage.
+Wer nur an bestimmten Tagen arbeitet, lässt ihn nur diese Tage zählen: An einem
+abgewählten Tag steht er still und wandert erst am nächsten gezählten Tag
+weiter. Der violette Balken bleibt unberührt, er zeigt weiter den echten
+Verbrauch des 7-Tage-Fensters.
+
+Gewählt wird entweder im Untermenü `Wochenpunkt zählt: …` des
+Menüleisten-Symbols oder mit `python3 -m claudecounter weekdays --set`. Beides
+schreibt sieben Ziffern nach
+`~/Library/Application Support/ClaudeCounter/weekdays`, eine je Tag von Montag
+bis Sonntag, `1` für zählt und `0` für zählt nicht — Montag bis Freitag ist also
+`1111100`. Der Daemon liest die Datei bei jedem Bild neu, spätestens nach fünf
+Sekunden steht der Punkt richtig.
+
+Der letzte verbliebene Tag lässt sich nicht auch noch abschalten, und eine
+fehlende oder unlesbare Datei bedeutet: alle sieben Tage zählen. Ein leerer
+Wochenpunkt kommt damit nicht vor.
+
+Ist die gewählte Woche aufgebraucht, bleibt der Punkt auf dem rechten Rand
+stehen, bis das Fenster umspringt — er fängt nicht vorzeitig wieder links an.
+
+### Welche Stunden der Wochenpunkt zählt
+
+Dieselbe Idee für den Tag: Der Punkt zählt normalerweise alle 24 Stunden, kann
+aber auf ein Zeitfenster eingeschränkt werden. Außerhalb steht er still, an
+jedem gezählten Tag gilt dasselbe Fenster.
+
+Gewählt wird im Untermenü `Wochenpunkt zählt Stunden: …` des
+Menüleisten-Symbols oder mit `python3 -m claudecounter hours --set 07:00-24:00`.
+Beides schreibt die Spanne nach
+`~/Library/Application Support/ClaudeCounter/dayhours`, in der Form
+`hh:mm-hh:mm` mit `24:00` als Mitternacht am Ende des Tages. Der Daemon liest
+die Datei bei jedem Bild neu, spätestens nach fünf Sekunden steht der Punkt
+richtig.
+
+Eine fehlende, unlesbare oder verdrehte Spanne bedeutet: der ganze Tag zählt.
+Beide Filter wirken zusammen — `1111100` und `07:00-24:00` zählen Montag bis
+Freitag ab sieben Uhr morgens.
+
+Wichtig dabei: Es wird aus Zähler *und* Nenner geschnitten. Das 7-Tage-Fenster
+von Anthropic bleibt, wie es ist; der Punkt verteilt sich nur auf die gezählte
+Zeit darin. Nächte wegzulassen verschiebt ihn deshalb meist nur um ein bis zwei
+Pixel, das Wochenende wegzulassen um mehr.
 
 Der Wert gilt erst nach zehn Minuten als veraltet und wird dann gedimmt. Eine
 kurze Sperre des Endpunkts oder ein einzelner Fehlversuch dunkelt die Anzeige
@@ -339,6 +405,8 @@ claudecounter/
   usage_source.py  Token, Endpunkt, lokale Datei, Fehlerklassen
   attention.py     Markierungen wartender Sitzungen
   presence.py      vorderste App und Zeit seit der letzten Eingabe
+  weekdays.py      welche Wochentage der Wochenpunkt zählt
+  dayhours.py      welche Stunden eines Tages der Wochenpunkt zählt
   daemon.py        Schleife, Wiederholstrategie, Protokoll
   transport.py     Brücke zum Bluetooth-Helfer
   config.py        Gerätekonfiguration
