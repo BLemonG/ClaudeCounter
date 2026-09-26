@@ -13,6 +13,7 @@ from . import attention
 from . import protocol
 from . import render as renderer
 from . import transport
+from . import signin
 from . import usage_source
 from . import dayhours, weekdays
 from .config import DeviceConfig
@@ -28,6 +29,7 @@ ATTENTION_POLL_SECONDS = 5.0
 FAILURE_HEARTBEAT_EVERY = 60
 STALE_AFTER_SECONDS = 10 * 60
 RECALL_MAX_AGE_SECONDS = 24 * 60 * 60
+SIGN_IN_RENEWAL_SPACING_SECONDS = 15 * 60
 
 PUBLISHED_STATE_PATH = attention.ATTENTION_DIRECTORY / "state.json"
 BRIGHTNESS_PATH = attention.ATTENTION_DIRECTORY / "brightness"
@@ -79,6 +81,8 @@ class Daemon:
         active_hours_path: Path = ACTIVE_HOURS_PATH,
         read_usage=usage_source.read_usage,
         read_local_usage=usage_source.read_local_usage,
+        renew_sign_in=signin.ask_claude_code_to_renew,
+        sign_in_renewal_spacing: float = SIGN_IN_RENEWAL_SPACING_SECONDS,
         a_session_is_waiting=attention.a_session_is_waiting,
         refresh_requested=attention.refresh_requested,
         consume_refresh=attention.consume_refresh,
@@ -102,6 +106,9 @@ class Daemon:
         self.drawn_active_hours = None
         self.read_usage = read_usage
         self.read_local_usage = read_local_usage
+        self.renew_sign_in = renew_sign_in
+        self.sign_in_renewal_spacing = sign_in_renewal_spacing
+        self.last_renewal_at: Optional[float] = None
         self.a_session_is_waiting = a_session_is_waiting
         self.refresh_requested = refresh_requested
         self.consume_refresh = consume_refresh
@@ -232,6 +239,31 @@ class Daemon:
             return None
         return snapshot
 
+    def renewal_is_allowed(self) -> bool:
+        if self.last_renewal_at is None:
+            return True
+        return self.clock() - self.last_renewal_at >= self.sign_in_renewal_spacing
+
+    def read_usage_renewing_the_sign_in(self) -> UsageSnapshot:
+        try:
+            return self.read_usage()
+        except usage_source.ExpiredCredentials:
+            if not self.renewal_is_allowed():
+                raise
+            self.last_renewal_at = self.clock()
+            try:
+                renewed_until = self.renew_sign_in()
+            except Exception:
+                renewed_until = None
+            if renewed_until is None:
+                self.logger.info("asked Claude Code to renew the sign-in, it did not")
+                raise
+            self.logger.info(
+                "Claude Code renewed the sign-in, valid until %s",
+                renewed_until.astimezone().strftime("%Y-%m-%d %H:%M"),
+            )
+            return self.read_usage()
+
     def current_snapshot(self) -> Optional[UsageSnapshot]:
         if not self.usage_fetch_is_due():
             local = self.local_snapshot()
@@ -242,7 +274,7 @@ class Daemon:
         self.last_usage_fetch_at = self.clock()
         self.a_turn_asked_for_fresh_numbers()
         try:
-            snapshot = self.read_usage()
+            snapshot = self.read_usage_renewing_the_sign_in()
         except usage_source.RateLimited as failure:
             self.consecutive_usage_failures += 1
             self.remember_trouble(failure)

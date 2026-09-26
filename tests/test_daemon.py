@@ -19,6 +19,7 @@ from claudecounter.daemon import (
     FORCED_RESEND_SECONDS,
     INITIAL_BACKOFF_SECONDS,
     MINIMUM_FETCH_SPACING_SECONDS,
+    SIGN_IN_RENEWAL_SPACING_SECONDS,
     STALE_AFTER_SECONDS,
 )
 from claudecounter.snapshot import UsageSnapshot
@@ -113,7 +114,9 @@ def snapshot(session: float, weekly: float, stale: bool = False) -> UsageSnapsho
 def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
           read_local_usage=lambda: None, resend_interval: float = FORCED_RESEND_SECONDS,
           a_session_is_waiting=lambda: False, refresh=None,
-          minimum_fetch_spacing: float = MINIMUM_FETCH_SPACING_SECONDS) -> Daemon:
+          minimum_fetch_spacing: float = MINIMUM_FETCH_SPACING_SECONDS,
+          renew_sign_in=lambda: None,
+          sign_in_renewal_spacing: float = SIGN_IN_RENEWAL_SPACING_SECONDS) -> Daemon:
     pending = refresh if refresh is not None else {"asked": False}
 
     def refresh_requested() -> bool:
@@ -137,6 +140,8 @@ def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
         minimum_fetch_spacing=minimum_fetch_spacing,
         read_usage=read_usage,
         read_local_usage=read_local_usage,
+        renew_sign_in=renew_sign_in,
+        sign_in_renewal_spacing=sign_in_renewal_spacing,
         a_session_is_waiting=a_session_is_waiting,
         refresh_requested=refresh_requested,
         consume_refresh=consume_refresh,
@@ -1044,6 +1049,81 @@ def the_day_hours_setting_reaches_the_marker() -> None:
     wish.unlink(missing_ok=True)
 
 
+def an_expired_sign_in_is_renewed_through_claude_code() -> None:
+    print("sign-in renewal")
+    tokens = {"valid": False}
+    renewals = []
+
+    def read_usage():
+        if not tokens["valid"]:
+            raise usage_source.ExpiredCredentials("the token expired, sign in again")
+        return snapshot(30.0, 20.0)
+
+    def renew_sign_in():
+        renewals.append(True)
+        tokens["valid"] = True
+        return datetime.now(timezone.utc) + timedelta(hours=8)
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(read_usage, display, clock, renew_sign_in=renew_sign_in)
+    check(daemon.tick() is True, "a renewed sign-in keeps the loop alive")
+    check(len(renewals) == 1, "an expired token asks Claude Code once")
+    check(display.sent == [still(renderer.render(snapshot(30.0, 20.0)))],
+          "the reading after the renewal reaches the display right away")
+    check(daemon.consecutive_usage_failures == 0, "a renewed sign-in is no failure")
+
+
+def a_failed_renewal_keeps_the_last_reading_and_waits() -> None:
+    print("failed sign-in renewal")
+    tokens = {"valid": True}
+    renewals = []
+
+    def read_usage():
+        if not tokens["valid"]:
+            raise usage_source.ExpiredCredentials("the token expired, sign in again")
+        return snapshot(64.0, 38.0)
+
+    def renew_sign_in():
+        renewals.append(True)
+        return None
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(read_usage, display, clock, renew_sign_in=renew_sign_in,
+                   minimum_fetch_spacing=0.0)
+    daemon.tick()
+    tokens["valid"] = False
+
+    for _ in range(10):
+        clock.advance(60.0)
+        check(daemon.tick() is True, "a failed renewal never stops the loop")
+    check(len(renewals) == 1,
+          "Claude Code is not asked again before the renewal spacing has passed")
+    check(daemon.last_snapshot is not None and daemon.last_snapshot.session_pct == 64.0,
+          "the last known reading is kept while the sign-in is gone")
+    zero_frame = still(renderer.render(snapshot(0.0, 0.0)))
+    check(zero_frame not in display.sent, "a failed renewal never draws zero percent")
+
+    clock.advance(SIGN_IN_RENEWAL_SPACING_SECONDS)
+    daemon.tick()
+    check(len(renewals) == 2, "Claude Code is asked again once the spacing has passed")
+
+
+def a_crashing_renewal_is_treated_as_not_renewed() -> None:
+    print("crashing sign-in renewal")
+
+    def read_usage():
+        raise usage_source.ExpiredCredentials("the token expired, sign in again")
+
+    def renew_sign_in():
+        raise OSError("claude could not be started")
+
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(read_usage, display, clock, renew_sign_in=renew_sign_in)
+    check(daemon.tick() is True, "a crashing renewal does not crash the loop")
+    check(display.sent == [still(renderer.render_unavailable())],
+          "without any reading the display still states that it has no data")
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
@@ -1070,6 +1150,9 @@ def main() -> int:
     a_restart_keeps_the_last_known_reading()
     the_weekday_setting_reaches_the_marker()
     the_day_hours_setting_reaches_the_marker()
+    an_expired_sign_in_is_renewed_through_claude_code()
+    a_failed_renewal_keeps_the_last_reading_and_waits()
+    a_crashing_renewal_is_treated_as_not_renewed()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

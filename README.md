@@ -338,8 +338,18 @@ binnen Sekunden selbst wieder auf. Bleibt: unter Systemeinstellungen → Ton die
 gewünschte Ausgabe wählen, oder die Timebox aus der Bluetooth-Liste entfernen.
 
 **„the Claude Code access token expired"**
-Das Token wird nur erneuert, wenn die CLI wirklich benutzt wird —
-`claude auth status` genügt dafür nicht. Melde dich im Terminal neu an:
+Das Access-Token von Claude Code gilt etwa 8 Stunden. Es wird nur erneuert,
+wenn die CLI wirklich eine Anfrage stellt — `claude auth status` genügt dafür
+nicht. Der Daemon übernimmt das deshalb selbst: Ist das Token abgelaufen, lässt
+er Claude Code eine winzige Anfrage stellen (Haiku, ohne Werkzeuge, Hooks,
+Plugins, MCP-Server und ohne Transkript) und liest danach den Schlüsselbund neu.
+Die Tokenwerte fasst er dabei nicht an. Höchstens alle 15 Minuten ein Versuch;
+im Protokoll steht dann „Claude Code renewed the sign-in, valid until …“ oder
+„asked Claude Code to renew the sign-in, it did not“. Jeder Versuch kostet eine
+sehr kleine Menge Kontingent und kann ein 5-Stunden-Fenster eröffnen.
+
+Hilft das nicht (etwa weil auch das Refresh-Token nach rund 30 Tagen
+abgelaufen ist), melde dich im Terminal neu an:
 
 ```bash
 claude auth login
@@ -403,6 +413,7 @@ claudecounter/
   protocol.py      Divoom-Drahtformat, bytegenau gegen fünf echte Aufnahmen geprüft
   render.py        16×16-Bild aus einem Messwert, Standbild und Atem-Schleife
   usage_source.py  Token, Endpunkt, lokale Datei, Fehlerklassen
+  signin.py        lässt Claude Code eine abgelaufene Anmeldung erneuern
   attention.py     Markierungen wartender Sitzungen
   presence.py      vorderste App und Zeit seit der letzten Eingabe
   weekdays.py      welche Wochentage der Wochenpunkt zählt
