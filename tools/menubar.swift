@@ -147,7 +147,7 @@ func startService(_ label: String) {
     if FileManager.default.fileExists(atPath: plist) {
         run("/bin/launchctl", ["bootstrap", "gui/\(getuid())", plist])
     }
-    run("/bin/launchctl", ["kickstart", "-k", serviceTarget(label)])
+    run("/bin/launchctl", ["kickstart", serviceTarget(label)])
 }
 
 func stopService(_ label: String) {
@@ -629,6 +629,8 @@ final class MenuController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
     private var refreshTimer: Timer?
     private var notificationState: UNAuthorizationStatus = .notDetermined
+    private var counterRuns = false
+    private var audioGuardRuns = false
     private let brightnessLabel = NSTextField(labelWithString: "")
     private let brightnessSlider = NSSlider()
 
@@ -639,9 +641,37 @@ final class MenuController: NSObject, NSMenuDelegate {
         Notifier.shared.begin()
         redrawTitle()
         watchLogin()
+        readServiceStates()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
             self?.redrawTitle()
             self?.watchLogin()
+            self?.readServiceStates()
+        }
+    }
+
+    private func readServiceStates() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let counter = serviceIsLoaded(counterLabel)
+            let sound = serviceIsLoaded(audioGuardLabel)
+            DispatchQueue.main.async {
+                self?.counterRuns = counter
+                self?.audioGuardRuns = sound
+            }
+        }
+    }
+
+    private func changeService(_ label: String, _ wanted: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            wanted ? startService(label) : stopService(label)
+            let running = serviceIsLoaded(label)
+            DispatchQueue.main.async {
+                if label == counterLabel {
+                    self?.counterRuns = running
+                } else {
+                    self?.audioGuardRuns = running
+                }
+                self?.redrawTitle()
+            }
         }
     }
 
@@ -699,13 +729,12 @@ final class MenuController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
-        let counterRuns = serviceIsLoaded(counterLabel)
+        readServiceStates()
         menu.addItem(switchRow(
             "Z\u{e4}hler", "timer", counterRuns, #selector(counterSwitched(_:))
         ))
         menu.addItem(switchRow(
-            "Tonschutz", "speaker.slash", serviceIsLoaded(audioGuardLabel),
-            #selector(audioGuardSwitched(_:))
+            "Tonschutz", "speaker.slash", audioGuardRuns, #selector(audioGuardSwitched(_:))
         ))
         menu.addItem(brightnessRow())
         if !counterRuns {
@@ -1021,12 +1050,17 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
 
     @objc private func counterSwitched(_ sender: NSSwitch) {
-        sender.state == .on ? startService(counterLabel) : stopService(counterLabel)
-        redrawTitle()
+        let wanted = sender.state == .on
+        counterRuns = wanted
+        menu.cancelTracking()
+        changeService(counterLabel, wanted)
     }
 
     @objc private func audioGuardSwitched(_ sender: NSSwitch) {
-        sender.state == .on ? startService(audioGuardLabel) : stopService(audioGuardLabel)
+        let wanted = sender.state == .on
+        audioGuardRuns = wanted
+        menu.cancelTracking()
+        changeService(audioGuardLabel, wanted)
     }
 
     @objc private func askForRefresh() {
