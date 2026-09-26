@@ -46,7 +46,7 @@ Es wird **nie** 0 % angezeigt, wenn in Wahrheit nur die Datenquelle fehlt.
 ## Einrichtung
 
 ```bash
-git clone <dein-repo> ClaudeCounter
+git clone https://github.com/BLemonG/ClaudeCounter.git
 cd ClaudeCounter
 python3 -m pip install -r requirements.txt
 ```
