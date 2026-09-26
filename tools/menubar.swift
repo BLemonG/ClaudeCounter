@@ -40,12 +40,6 @@ func writeActiveDays(_ days: Set<Int>) {
     try? marks.write(to: weekdaysFile, atomically: true, encoding: .utf8)
 }
 
-func spokenDays(_ days: Set<Int>) -> String {
-    if days == everyDay { return "alle Tage" }
-    if days == Set(0...4) { return "Mo–Fr" }
-    return (0..<7).filter { days.contains($0) }.map { weekdayNames[$0] }.joined(separator: ", ")
-}
-
 struct HourWindow: Equatable {
     let opens: Int
     let shuts: Int
@@ -505,7 +499,13 @@ func sessionColor(_ percent: Double) -> NSColor {
     return sessionRed
 }
 
-func drawTimeMarker(_ fraction: Double?, _ center: NSPoint, _ radius: CGFloat, _ stale: Bool) {
+func drawTimeMarker(
+    _ fraction: Double?,
+    _ center: NSPoint,
+    _ radius: CGFloat,
+    _ stale: Bool,
+    _ dotRadius: CGFloat
+) {
     guard let fraction = fraction else { return }
     let radians = (90.0 - 360.0 * fraction) * Double.pi / 180.0
     let spot = NSPoint(
@@ -514,38 +514,50 @@ func drawTimeMarker(_ fraction: Double?, _ center: NSPoint, _ radius: CGFloat, _
     )
     let dot = NSBezierPath(
         ovalIn: NSRect(
-            x: spot.x - markerRadius,
-            y: spot.y - markerRadius,
-            width: markerRadius * 2.0,
-            height: markerRadius * 2.0
+            x: spot.x - dotRadius,
+            y: spot.y - dotRadius,
+            width: dotRadius * 2.0,
+            height: dotRadius * 2.0
         )
     )
     (stale ? timeMarker.withAlphaComponent(staleAlpha) : timeMarker).setFill()
     dot.fill()
 }
 
-func ringImage(percent: Double?, stale: Bool, elapsed: Double?) -> NSImage {
-    let image = NSImage(size: NSSize(width: iconSide, height: iconSide), flipped: false) { _ in
-        let center = NSPoint(x: iconSide / 2.0, y: iconSide / 2.0)
-        let radius = (iconSide - ringThickness) / 2.0 - 0.5
+func ringImage(
+    percent: Double?,
+    stale: Bool,
+    elapsed: Double?,
+    side: CGFloat = iconSide,
+    thickness: CGFloat = ringThickness,
+    marker: CGFloat = markerRadius,
+    showsDigits: Bool = true
+) -> NSImage {
+    let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+        let center = NSPoint(x: side / 2.0, y: side / 2.0)
+        let radius = (side - thickness) / 2.0 - 0.5
 
         let track = NSBezierPath()
         track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
-        track.lineWidth = ringThickness
+        track.lineWidth = thickness
         NSColor.labelColor.withAlphaComponent(0.22).setStroke()
         track.stroke()
 
         guard let value = percent else {
-            let mark = NSAttributedString(
-                string: "–",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                    .foregroundColor: NSColor.labelColor.withAlphaComponent(0.5),
-                ]
-            )
-            let size = mark.size()
-            mark.draw(at: NSPoint(x: center.x - size.width / 2.0, y: center.y - size.height / 2.0))
-            drawTimeMarker(elapsed, center, radius, stale)
+            if showsDigits {
+                let mark = NSAttributedString(
+                    string: "\u{2013}",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: side / 2.0, weight: .semibold),
+                        .foregroundColor: NSColor.labelColor.withAlphaComponent(0.5),
+                    ]
+                )
+                let size = mark.size()
+                mark.draw(
+                    at: NSPoint(x: center.x - size.width / 2.0, y: center.y - size.height / 2.0)
+                )
+            }
+            drawTimeMarker(elapsed, center, radius, stale, marker)
             return true
         }
 
@@ -560,29 +572,56 @@ func ringImage(percent: Double?, stale: Bool, elapsed: Double?) -> NSImage {
                 endAngle: 90 - sweep,
                 clockwise: true
             )
-            arc.lineWidth = ringThickness
+            arc.lineWidth = thickness
             arc.lineCapStyle = .round
             let color = sessionColor(filled)
             (stale ? color.withAlphaComponent(staleAlpha) : color).setStroke()
             arc.stroke()
         }
 
-        let shown = Int(filled.rounded())
-        let pointSize: CGFloat = shown >= 100 ? 6.0 : (shown >= 10 ? 8.0 : 9.5)
-        let digits = NSAttributedString(
-            string: "\(shown)",
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: pointSize, weight: .bold),
-                .foregroundColor: NSColor.labelColor.withAlphaComponent(stale ? 0.55 : 1.0),
-            ]
-        )
-        let size = digits.size()
-        digits.draw(at: NSPoint(x: center.x - size.width / 2.0, y: center.y - size.height / 2.0))
-        drawTimeMarker(elapsed, center, radius, stale)
+        if showsDigits {
+            let shown = Int(filled.rounded())
+            let pointSize: CGFloat = shown >= 100 ? 6.0 : (shown >= 10 ? 8.0 : 9.5)
+            let digits = NSAttributedString(
+                string: "\(shown)",
+                attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: pointSize, weight: .bold),
+                    .foregroundColor: NSColor.labelColor.withAlphaComponent(stale ? 0.55 : 1.0),
+                ]
+            )
+            let size = digits.size()
+            digits.draw(
+                at: NSPoint(x: center.x - size.width / 2.0, y: center.y - size.height / 2.0)
+            )
+        }
+        drawTimeMarker(elapsed, center, radius, stale, marker)
         return true
     }
     image.isTemplate = false
     return image
+}
+
+let menuWidth: CGFloat = 340.0
+let menuPadding: CGFloat = 14.0
+let cardGap: CGFloat = 8.0
+let cardWidth: CGFloat = (menuWidth - 2.0 * menuPadding - cardGap) / 2.0
+let cardHeight: CGFloat = 56.0
+let cardRingSide: CGFloat = 36.0
+let rowHeight: CGFloat = 30.0
+
+func symbolImage(_ name: String, _ pointSize: CGFloat) -> NSImage? {
+    let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+    return image?.withSymbolConfiguration(
+        NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+    )
+}
+
+final class CardBackground: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let shape = NSBezierPath(roundedRect: bounds, xRadius: 8.0, yRadius: 8.0)
+        NSColor.labelColor.withAlphaComponent(0.07).setFill()
+        shape.fill()
+    }
 }
 
 final class MenuController: NSObject, NSMenuDelegate {
@@ -638,71 +677,226 @@ final class MenuController: NSObject, NSMenuDelegate {
         redrawTitle()
         menu.removeAllItems()
 
-        if let reading = latestReading() {
-            let headline = reading.stale
-                ? "Sitzung \(Int(reading.session.rounded())) % · Woche \(Int(reading.weekly.rounded())) % (veraltet)"
-                : "Sitzung \(Int(reading.session.rounded())) % · Woche \(Int(reading.weekly.rounded())) %"
-            menu.addItem(disabled(headline))
-            menu.addItem(disabled("zuletzt \(reading.moment) Uhr"))
-            if let resets = reading.sessionResetsAt, let at = clockText(resets, "HH:mm") {
-                let elapsed = elapsedFraction(resets, sessionWindow) ?? 0.0
-                menu.addItem(disabled(
-                    "blauer Punkt: \(Int((elapsed * 100).rounded())) % der 5 Stunden um, frei um \(at) Uhr"
-                ))
-            }
-            if let weeklyResets = reading.weeklyResetsAt {
-                let days = activeDays()
-                let hours = activeHours()
-                let passed = weeklyElapsedFraction(weeklyResets, days, hours) ?? 0.0
-                let narrowed = days != everyDay || hours != wholeDay
-                let scope = narrowed ? "der gewählten Zeit" : "der Woche"
-                menu.addItem(disabled(
-                    "blauer Punkt Woche: \(Int((passed * 100).rounded())) % \(scope) um"
-                ))
-            }
-        } else {
-            menu.addItem(disabled("noch kein Messwert"))
-        }
+        let reading = latestReading()
+        menu.addItem(readingRow(reading))
+        menu.addItem(momentRow(reading))
+
         let state = publishedState()
         if let spoken = spokenTrouble(state?.trouble, state?.troubleReason) {
-            menu.addItem(disabled(spoken))
+            menu.addItem(note(spoken, "exclamationmark.triangle"))
         }
         if loginIsGone(state?.trouble) {
-            menu.addItem(action("Jetzt neu anmelden …", #selector(logInAgain)))
+            menu.addItem(action(
+                "Jetzt neu anmelden \u{2026}", #selector(logInAgain),
+                "person.crop.circle.badge.checkmark"
+            ))
         }
         if notificationState == .denied {
-            menu.addItem(disabled("Mitteilungen sind abgeschaltet"))
-            menu.addItem(action("Mitteilungen einschalten …", #selector(openNotificationSettings)))
+            menu.addItem(note("Mitteilungen sind abgeschaltet", "bell.slash"))
+            menu.addItem(action(
+                "Mitteilungen einschalten \u{2026}", #selector(openNotificationSettings), "bell"
+            ))
         }
         menu.addItem(.separator())
 
         let counterRuns = serviceIsLoaded(counterLabel)
-        menu.addItem(disabled(counterRuns ? "Zähler läuft" : "Zähler gestoppt"))
-        menu.addItem(action(counterRuns ? "Zähler stoppen" : "Zähler starten", #selector(toggleCounter)))
-        menu.addItem(action("Anzeige jetzt auffrischen", #selector(askForRefresh)))
-        menu.addItem(brightnessRow(counterRuns))
-        menu.addItem(weekdayChoice())
+        menu.addItem(switchRow(
+            "Z\u{e4}hler", "timer", counterRuns, #selector(counterSwitched(_:))
+        ))
+        menu.addItem(switchRow(
+            "Tonschutz", "speaker.slash", serviceIsLoaded(audioGuardLabel),
+            #selector(audioGuardSwitched(_:))
+        ))
+        menu.addItem(brightnessRow())
+        if !counterRuns {
+            menu.addItem(note("Helligkeit wirkt, sobald der Z\u{e4}hler l\u{e4}uft", nil))
+        }
+        menu.addItem(.separator())
+
+        menu.addItem(note("Wochenpunkt z\u{e4}hlt", "calendar"))
+        menu.addItem(weekdayRow())
         menu.addItem(hourChoice())
         menu.addItem(.separator())
 
-        let guardRuns = serviceIsLoaded(audioGuardLabel)
-        menu.addItem(disabled(guardRuns ? "Tonschutz läuft" : "Tonschutz gestoppt"))
-        menu.addItem(action(guardRuns ? "Tonschutz stoppen" : "Tonschutz starten", #selector(toggleAudioGuard)))
-        menu.addItem(.separator())
-
-        menu.addItem(action("Bei Claude neu anmelden …", #selector(logInAgain)))
-        menu.addItem(action("Protokoll öffnen", #selector(openLog)))
-        menu.addItem(action("Menü beenden", #selector(leave)))
+        menu.addItem(action(
+            "Bei Claude neu anmelden \u{2026}", #selector(logInAgain),
+            "person.crop.circle.badge.checkmark"
+        ))
+        menu.addItem(action("Protokoll \u{f6}ffnen", #selector(openLog), "doc.plaintext"))
+        menu.addItem(action("Men\u{fc} beenden", #selector(leave), "power"))
     }
 
-    private func brightnessRow(_ counterRuns: Bool) -> NSMenuItem {
+    private func readingRow(_ reading: Reading?) -> NSMenuItem {
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: menuWidth, height: cardHeight + 8.0))
+        guard let reading = reading else {
+            let empty = NSTextField(labelWithString: "noch kein Messwert")
+            empty.font = NSFont.menuFont(ofSize: 13)
+            empty.textColor = .secondaryLabelColor
+            empty.frame = NSRect(x: menuPadding, y: 20, width: menuWidth - 2.0 * menuPadding, height: 18)
+            row.addSubview(empty)
+            let entry = NSMenuItem()
+            entry.view = row
+            return entry
+        }
+
+        let days = activeDays()
+        let hours = activeHours()
+        let freeAt = clockText(reading.sessionResetsAt, "HH:mm")
+        row.addSubview(card(
+            at: menuPadding,
+            title: "Sitzung",
+            percent: reading.session,
+            hint: freeAt.map { "frei um \($0)" } ?? "",
+            stale: reading.stale,
+            elapsed: elapsedFraction(reading.sessionResetsAt, sessionWindow)
+        ))
+
+        let weeklyElapsed = weeklyElapsedFraction(reading.weeklyResetsAt, days, hours)
+        let narrowed = days != everyDay || hours != wholeDay
+        let weeklyHint = weeklyElapsed.map {
+            "\(Int(($0 * 100).rounded())) % der \(narrowed ? "Zeit" : "Woche") um"
+        } ?? ""
+        row.addSubview(card(
+            at: menuPadding + cardWidth + cardGap,
+            title: "Woche",
+            percent: reading.weekly,
+            hint: weeklyHint,
+            stale: reading.stale,
+            elapsed: weeklyElapsed
+        ))
+
+        let entry = NSMenuItem()
+        entry.view = row
+        return entry
+    }
+
+    private func card(
+        at left: CGFloat,
+        title: String,
+        percent: Double,
+        hint: String,
+        stale: Bool,
+        elapsed: Double?
+    ) -> NSView {
+        let box = CardBackground(frame: NSRect(x: left, y: 4, width: cardWidth, height: cardHeight))
+        let ring = NSImageView(frame: NSRect(x: 8, y: 10, width: cardRingSide, height: cardRingSide))
+        ring.image = ringImage(
+            percent: percent,
+            stale: stale,
+            elapsed: elapsed,
+            side: cardRingSide,
+            thickness: 4.0,
+            marker: 2.6,
+            showsDigits: false
+        )
+        box.addSubview(ring)
+
+        let textLeft = cardRingSide + 14.0
+        let textWidth = cardWidth - textLeft - 8.0
+
+        let name = NSTextField(labelWithString: title)
+        name.font = NSFont.systemFont(ofSize: 10)
+        name.textColor = .secondaryLabelColor
+        name.frame = NSRect(x: textLeft, y: 38, width: textWidth, height: 13)
+        box.addSubview(name)
+
+        let value = NSTextField(labelWithString: "\(Int(percent.rounded())) %")
+        value.font = NSFont.monospacedDigitSystemFont(ofSize: 17, weight: .medium)
+        value.textColor = stale ? .secondaryLabelColor : .labelColor
+        value.frame = NSRect(x: textLeft, y: 19, width: textWidth, height: 20)
+        box.addSubview(value)
+
+        if !hint.isEmpty {
+            let spoken = NSTextField(labelWithString: hint)
+            spoken.font = NSFont.systemFont(ofSize: 10)
+            spoken.textColor = .tertiaryLabelColor
+            spoken.lineBreakMode = .byTruncatingTail
+            spoken.frame = NSRect(x: textLeft, y: 5, width: textWidth, height: 13)
+            box.addSubview(spoken)
+        }
+        return box
+    }
+
+    private func momentRow(_ reading: Reading?) -> NSMenuItem {
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 24))
+        let spoken: String
+        if let reading = reading {
+            spoken = reading.stale
+                ? "zuletzt \(reading.moment) Uhr, veraltet"
+                : "zuletzt \(reading.moment) Uhr"
+        } else {
+            spoken = "noch keine Messung"
+        }
+        let moment = NSTextField(labelWithString: spoken)
+        moment.font = NSFont.systemFont(ofSize: 11)
+        moment.textColor = .tertiaryLabelColor
+        moment.frame = NSRect(x: menuPadding, y: 4, width: 190, height: 15)
+        row.addSubview(moment)
+
+        let refresh = NSButton(
+            title: "auffrischen", target: self, action: #selector(askForRefresh)
+        )
+        refresh.image = symbolImage("arrow.clockwise", 10)
+        refresh.imagePosition = .imageLeading
+        refresh.isBordered = false
+        refresh.font = NSFont.systemFont(ofSize: 11)
+        refresh.contentTintColor = .controlAccentColor
+        refresh.sizeToFit()
+        refresh.setFrameOrigin(NSPoint(
+            x: menuWidth - menuPadding - refresh.frame.width, y: 2
+        ))
+        row.addSubview(refresh)
+
+        let entry = NSMenuItem()
+        entry.view = row
+        return entry
+    }
+
+    private func rowWithIcon(_ symbol: String?) -> NSView {
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: menuWidth, height: rowHeight))
+        guard let symbol = symbol else { return row }
+        let icon = NSImageView(frame: NSRect(x: menuPadding, y: 7, width: 16, height: 16))
+        icon.image = symbolImage(symbol, 14)
+        icon.contentTintColor = .secondaryLabelColor
+        row.addSubview(icon)
+        return row
+    }
+
+    private func switchRow(
+        _ title: String, _ symbol: String, _ isOn: Bool, _ selector: Selector
+    ) -> NSMenuItem {
+        let row = rowWithIcon(symbol)
+        let name = NSTextField(labelWithString: title)
+        name.font = NSFont.menuFont(ofSize: 13)
+        name.frame = NSRect(x: menuPadding + 24, y: 6, width: 180, height: 17)
+        row.addSubview(name)
+
+        let lever = NSSwitch()
+        lever.controlSize = .small
+        lever.sizeToFit()
+        lever.state = isOn ? .on : .off
+        lever.target = self
+        lever.action = selector
+        lever.setFrameOrigin(NSPoint(
+            x: menuWidth - menuPadding - lever.frame.width,
+            y: (rowHeight - lever.frame.height) / 2.0
+        ))
+        row.addSubview(lever)
+
+        let entry = NSMenuItem()
+        entry.view = row
+        return entry
+    }
+
+    private func brightnessRow() -> NSMenuItem {
         let level = wantedBrightness()
-        brightnessLabel.stringValue = counterRuns
-            ? "Helligkeit \(level) %"
-            : "Helligkeit \(level) % (wirkt, sobald der Zähler läuft)"
-        brightnessLabel.font = NSFont.menuFont(ofSize: 13)
-        brightnessLabel.textColor = counterRuns ? .labelColor : .secondaryLabelColor
-        brightnessLabel.frame = NSRect(x: 14, y: 25, width: 260, height: 16)
+        let row = rowWithIcon("sun.max")
+
+        brightnessLabel.stringValue = "\(level) %"
+        brightnessLabel.font = NSFont.systemFont(ofSize: 11)
+        brightnessLabel.textColor = .secondaryLabelColor
+        brightnessLabel.alignment = .right
+        brightnessLabel.frame = NSRect(x: menuWidth - menuPadding - 42, y: 7, width: 42, height: 15)
 
         brightnessSlider.minValue = 0
         brightnessSlider.maxValue = 100
@@ -710,49 +904,42 @@ final class MenuController: NSObject, NSMenuDelegate {
         brightnessSlider.isContinuous = true
         brightnessSlider.target = self
         brightnessSlider.action = #selector(brightnessMoved(_:))
-        brightnessSlider.frame = NSRect(x: 14, y: 3, width: 260, height: 20)
+        brightnessSlider.frame = NSRect(
+            x: menuPadding + 24,
+            y: 5,
+            width: menuWidth - 2.0 * menuPadding - 24 - 50,
+            height: 20
+        )
 
-        let row = NSView(frame: NSRect(x: 0, y: 0, width: 288, height: 46))
-        row.addSubview(brightnessLabel)
         row.addSubview(brightnessSlider)
+        row.addSubview(brightnessLabel)
 
         let entry = NSMenuItem()
         entry.view = row
         return entry
     }
 
-    private func weekdayChoice() -> NSMenuItem {
+    private func weekdayRow() -> NSMenuItem {
         let chosen = activeDays()
-        let days = NSMenu()
-        days.autoenablesItems = false
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: menuWidth, height: 30))
+        let pills = NSSegmentedControl(
+            labels: weekdayNames,
+            trackingMode: .selectAny,
+            target: self,
+            action: #selector(weekdayPicked(_:))
+        )
+        pills.segmentStyle = .rounded
+        pills.font = NSFont.systemFont(ofSize: 11)
+        let pillsWidth = menuWidth - menuPadding - 24 - menuPadding
+        pills.frame = NSRect(x: menuPadding + 24, y: 3, width: pillsWidth, height: 24)
         for day in 0..<7 {
-            let entry = NSMenuItem(
-                title: weekdayNames[day],
-                action: #selector(toggleWeekday(_:)),
-                keyEquivalent: ""
-            )
-            entry.target = self
-            entry.tag = day
-            entry.state = chosen.contains(day) ? .on : .off
-            entry.isEnabled = !(chosen.count == 1 && chosen.contains(day))
-            days.addItem(entry)
+            pills.setSelected(chosen.contains(day), forSegment: day)
+            pills.setWidth(pillsWidth / 7.0, forSegment: day)
         }
-        days.addItem(.separator())
-        let everything = NSMenuItem(
-            title: "Alle Tage zählen",
-            action: #selector(countEveryDay),
-            keyEquivalent: ""
-        )
-        everything.target = self
-        everything.isEnabled = chosen != everyDay
-        days.addItem(everything)
+        row.addSubview(pills)
 
-        let entry = NSMenuItem(
-            title: "Wochenpunkt zählt: \(spokenDays(chosen))",
-            action: nil,
-            keyEquivalent: ""
-        )
-        entry.submenu = days
+        let entry = NSMenuItem()
+        entry.view = row
         return entry
     }
 
@@ -780,10 +967,11 @@ final class MenuController: NSObject, NSMenuDelegate {
         }
 
         let entry = NSMenuItem(
-            title: "Wochenpunkt zählt Stunden: \(spokenHours(chosen))",
+            title: "Stunden: \(spokenHours(chosen))",
             action: nil,
             keyEquivalent: ""
         )
+        entry.image = symbolImage("clock", 13)
         entry.submenu = spans
         return entry
     }
@@ -794,51 +982,57 @@ final class MenuController: NSObject, NSMenuDelegate {
         )
     }
 
-    @objc private func toggleWeekday(_ sender: NSMenuItem) {
-        var chosen = activeDays()
-        if chosen.contains(sender.tag) {
-            guard chosen.count > 1 else { return }
-            chosen.remove(sender.tag)
-        } else {
-            chosen.insert(sender.tag)
+    @objc private func weekdayPicked(_ sender: NSSegmentedControl) {
+        var chosen: Set<Int> = []
+        for day in 0..<7 where sender.isSelected(forSegment: day) {
+            chosen.insert(day)
+        }
+        guard !chosen.isEmpty else {
+            sender.setSelected(true, forSegment: sender.selectedSegment)
+            return
         }
         writeActiveDays(chosen)
     }
 
-    @objc private func countEveryDay() {
-        writeActiveDays(everyDay)
-    }
-
     @objc private func brightnessMoved(_ slider: NSSlider) {
         let level = Int(slider.doubleValue.rounded())
-        brightnessLabel.stringValue = "Helligkeit \(level) %"
+        brightnessLabel.stringValue = "\(level) %"
         writeWantedBrightness(level)
     }
 
-    private func disabled(_ title: String) -> NSMenuItem {
+    private func note(_ title: String, _ symbol: String?) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         entry.isEnabled = false
+        if let symbol = symbol {
+            entry.image = symbolImage(symbol, 13)
+        }
         return entry
     }
 
-    private func action(_ title: String, _ selector: Selector) -> NSMenuItem {
+    private func action(
+        _ title: String, _ selector: Selector, _ symbol: String? = nil
+    ) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: selector, keyEquivalent: "")
         entry.target = self
+        if let symbol = symbol {
+            entry.image = symbolImage(symbol, 13)
+        }
         return entry
     }
 
-    @objc private func toggleCounter() {
-        serviceIsLoaded(counterLabel) ? stopService(counterLabel) : startService(counterLabel)
+    @objc private func counterSwitched(_ sender: NSSwitch) {
+        sender.state == .on ? startService(counterLabel) : stopService(counterLabel)
         redrawTitle()
     }
 
-    @objc private func toggleAudioGuard() {
-        serviceIsLoaded(audioGuardLabel) ? stopService(audioGuardLabel) : startService(audioGuardLabel)
+    @objc private func audioGuardSwitched(_ sender: NSSwitch) {
+        sender.state == .on ? startService(audioGuardLabel) : stopService(audioGuardLabel)
     }
 
     @objc private func askForRefresh() {
         let request = stateDirectory.appendingPathComponent("refresh-please")
         try? Data().write(to: request)
+        menu.cancelTracking()
     }
 
     @objc private func logInAgain() {
