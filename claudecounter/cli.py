@@ -12,7 +12,7 @@ from . import render as renderer
 from . import transport
 from . import daemon as daemon_module
 from . import usage_source
-from . import dayhours, weekdays
+from . import dayhours, sessionstart, weekdays
 from .config import DEFAULT_RFCOMM_CHANNEL, DeviceConfig, load_config, save_config
 from .snapshot import UsageSnapshot, utc_now_iso
 
@@ -295,6 +295,16 @@ def cmd_hours(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_session_start(args: argparse.Namespace) -> int:
+    opening = dayhours.minutes_from_clock(args.at)
+    if opening is None or opening >= dayhours.MINUTES_PER_DAY or opening % 60 != int(args.at.split(":")[1]):
+        print(f"unreadable time {args.at!r}, use a time like 05:00", file=sys.stderr)
+        return 1
+    logger = daemon_module.build_logger(verbose=args.verbose)
+    sessionstart.open_the_session(logger, opening_minutes=opening, dry_run=args.dry_run)
+    return 0
+
+
 def cmd_usage(args: argparse.Namespace) -> int:
     try:
         if args.raw:
@@ -432,6 +442,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-day", action="store_true", help="count every hour again"
     )
     hour_choice.set_defaults(func=cmd_hours)
+
+    session_start = subcommands.add_parser(
+        "session-start",
+        help="open the 5h session window with a tiny request on weekday mornings",
+    )
+    session_start.add_argument("--at", default="05:00", help="planned start, for example 05:00")
+    session_start.add_argument(
+        "--dry-run", action="store_true", help="only log whether the request would be sent now"
+    )
+    session_start.add_argument("--verbose", action="store_true")
+    session_start.set_defaults(func=cmd_session_start)
 
     usage = subcommands.add_parser("usage", help="read the current usage from the Anthropic endpoint")
     usage.add_argument("--raw", action="store_true", help="print the untouched endpoint response")

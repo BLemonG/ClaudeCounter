@@ -232,6 +232,36 @@ verliert die Zahlen damit nicht mehr.
 
 Logdatei: `~/Library/Logs/ClaudeCounter/claudecounter.log`
 
+### Sitzung morgens früh starten
+
+Das 5-Stunden-Fenster beginnt mit der ersten Anfrage. Wer es Mo–Fr um 05:00
+eröffnet, hat um 10:00 schon ein frisches Fenster. Dafür gibt es einen eigenen
+launchd-Job, der zur gewählten Zeit eine winzige Anfrage über Claude Code
+schickt (Haiku, ohne Werkzeuge, Hooks, Plugins, MCP-Server und ohne Transkript):
+
+```bash
+tools/session_start.sh 05:00
+tools/session_start.sh off
+```
+
+Regeln: nur Montag bis Freitag, höchstens einmal am Tag, und nur bis eine
+Stunde nach der gewählten Zeit. Wacht der Mac erst später auf, fällt der Start
+für diesen Tag aus, statt mitten am Vormittag ein Fenster zu öffnen. Scheitert
+die Anfrage, folgen bis zu zwei weitere Versuche im Minutenabstand. Während der
+Anfrage hält `caffeinate` den Mac wach.
+
+Schläft der Mac um diese Zeit, holt launchd den Termin erst beim Aufwachen
+nach. Damit er pünktlich wach ist, braucht es einen geplanten Weckzeitpunkt,
+den nur du mit Administratorrechten setzen kannst:
+
+```bash
+sudo pmset repeat wakeorpoweron MTWRF 05:00:00
+```
+
+Prüfen, ohne etwas zu senden: `python3 -m claudecounter session-start --dry-run`.
+Im Protokoll steht „morning session started …“, „… skipped, <Grund>“ oder
+„… failed after 3 attempt(s)“.
+
 ## Woher die Zahlen kommen
 
 Primär aus `GET https://api.anthropic.com/api/oauth/usage`, mit dem
@@ -414,6 +444,7 @@ claudecounter/
   render.py        16×16-Bild aus einem Messwert, Standbild und Atem-Schleife
   usage_source.py  Token, Endpunkt, lokale Datei, Fehlerklassen
   signin.py        lässt Claude Code eine abgelaufene Anmeldung erneuern
+  sessionstart.py  eröffnet werktags früh das 5-Stunden-Fenster
   attention.py     Markierungen wartender Sitzungen
   presence.py      vorderste App und Zeit seit der letzten Eingabe
   weekdays.py      welche Wochentage der Wochenpunkt zählt

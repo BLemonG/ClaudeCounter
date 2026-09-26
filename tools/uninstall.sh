@@ -17,6 +17,8 @@ rm -f "$GUARD_PLIST"
 launchctl bootout "gui/$UID/$MENU_LABEL" 2>/dev/null || true
 rm -f "$MENU_PLIST"
 
+bash "$(cd "$(dirname "$0")" && pwd)/session_start.sh" off
+
 python3 "$(cd "$(dirname "$0")" && pwd)/session_hook.py" unregister
 
 echo "removed $AGENT_PLIST"
