@@ -12,8 +12,14 @@ from . import render as renderer
 from . import transport
 from . import daemon as daemon_module
 from . import usage_source
-from . import dayhours, sessionstart, weekdays
-from .config import DEFAULT_RFCOMM_CHANNEL, DeviceConfig, load_config, save_config
+from . import dayhours, sessionstart, setup, weekdays
+from .config import (
+    DEFAULT_RFCOMM_CHANNEL,
+    DeviceConfig,
+    display_was_declined,
+    load_config,
+    save_config,
+)
 from .snapshot import UsageSnapshot, utc_now_iso
 
 MINIMUM_PREVIEW_SCALE = 16
@@ -68,10 +74,7 @@ def resolve_target(args: argparse.Namespace) -> Optional[DeviceConfig]:
         return DeviceConfig(mac=args.mac, channel=channel)
     stored = load_config()
     if stored is None:
-        print(
-            "no device configured, run: claudecounter configure --mac <ADDRESS>",
-            file=sys.stderr,
-        )
+        print("no device configured, run: claudecounter setup", file=sys.stderr)
         return None
     if getattr(args, "channel", None):
         return DeviceConfig(mac=stored.mac, channel=args.channel)
@@ -317,9 +320,19 @@ def cmd_usage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    return setup.run_setup()
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
-    target = resolve_target(args)
-    if target is None:
+    if getattr(args, "mac", None) or load_config() is not None:
+        target = resolve_target(args)
+        if target is None:
+            return 1
+    elif display_was_declined():
+        target = None
+    else:
+        print("nothing configured yet, run: claudecounter setup", file=sys.stderr)
         return 1
     if args.once:
         logger = daemon_module.build_logger(verbose=args.verbose)
@@ -365,6 +378,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_devices = subcommands.add_parser("list-devices", help="list paired bluetooth devices")
     list_devices.set_defaults(func=cmd_list_devices)
+
+    wizard = subcommands.add_parser("setup", help="ask for the display, or for none at all")
+    wizard.set_defaults(func=cmd_setup)
 
     configure = subcommands.add_parser("configure", help="store the device address and rfcomm channel")
     configure.add_argument("--mac", required=True, help="device address")

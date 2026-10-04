@@ -67,7 +67,7 @@ def build_logger(verbose: bool = False) -> logging.Logger:
 class Daemon:
     def __init__(
         self,
-        target: DeviceConfig,
+        target: Optional[DeviceConfig],
         logger: logging.Logger,
         poll_interval: float = POLL_INTERVAL_SECONDS,
         usage_fetch_interval: float = USAGE_FETCH_INTERVAL_SECONDS,
@@ -376,10 +376,17 @@ class Daemon:
         except OSError:
             self.logger.debug("could not publish the current reading")
 
+    def spoken_target(self) -> str:
+        if self.target is None:
+            return "no display, the menu bar reads the numbers"
+        return f"target {self.target.mac} channel {self.target.channel}"
+
     def tick(self) -> bool:
         snapshot = self.current_snapshot()
         self.publish_snapshot(snapshot)
         waiting = self.attention_is_wanted()
+        if self.target is None:
+            return True
         active_days = self.wanted_active_days()
         if self.drawn_active_days is not None and active_days != self.drawn_active_days:
             self.logger.info(
@@ -459,12 +466,11 @@ class Daemon:
                 dayhours.spelled(chosen_hours),
             )
         self.logger.info(
-            "starting, target %s channel %d, redrawing every %.0fs, "
+            "starting, %s, redrawing every %.0fs, "
             "asking the usage endpoint at most every %.0fs, "
             "watching for waiting sessions every %.0fs, "
             "and asking early when a turn ends, never closer than %.0fs",
-            self.target.mac,
-            self.target.channel,
+            self.spoken_target(),
             self.poll_interval,
             self.usage_fetch_interval,
             self.attention_poll_interval,
@@ -489,7 +495,7 @@ class Daemon:
         return 0
 
 
-def run_daemon(target: DeviceConfig, poll_interval: float = POLL_INTERVAL_SECONDS,
+def run_daemon(target: Optional[DeviceConfig], poll_interval: float = POLL_INTERVAL_SECONDS,
                verbose: bool = False) -> int:
     logger = build_logger(verbose=verbose)
     daemon = Daemon(target, logger, poll_interval=poll_interval)
