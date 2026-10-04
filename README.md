@@ -123,6 +123,7 @@ Der Mauszeiger auf dem Ring zeigt Sitzung und Woche als Kurzhinweis. Ein Klick
 - Zähler starten oder stoppen
 - Anzeige jetzt auffrischen
 - Tonschutz starten oder stoppen
+- `Ton zurück auf: …` — auf welchen Ausgang der Tonschutz zurückstellt
 - Protokoll öffnen
 
 Darunter steht, wie weit der cyane Punkt in der Woche ist, ein Untermenü
@@ -366,6 +367,18 @@ keiner der Referenzen gibt es dafür ein Kommando. Trennen hilft nur kurz:
 `claudecounter disconnect` funktioniert, aber die Timebox baut die Verbindung
 binnen Sekunden selbst wieder auf. Bleibt: unter Systemeinstellungen → Ton die
 gewünschte Ausgabe wählen, oder die Timebox aus der Bluetooth-Liste entfernen.
+
+**Der Ton landet nach der Timebox auf dem falschen Gerät**
+Der Tonschutz stellt von Haus aus auf das zuletzt benutzte Gerät zurück, das
+nicht die Timebox war. Wer einmal am Monitor saß, landet also später wieder
+dort. Im Menü legt `Ton zurück auf: …` ein festes Gerät fest, etwa die
+MacBook-Lautsprecher; `zuletzt benutztes` stellt das alte Verhalten wieder her.
+Die Wahl steht als Gerätekennung in
+`~/Library/Application Support/ClaudeCounter/preferred-output` und wirkt beim
+nächsten Eingriff, ohne Neustart. Ist das gewählte Gerät nicht angeschlossen,
+nimmt der Tonschutz wie bisher das zuletzt benutzte. Dasselbe geht für die
+Eingabe über die Datei `preferred-input`; das Menü bietet nur die Ausgabe an,
+weil die Eingabe selten stört.
 
 **„the Claude Code access token expired"**
 Das Access-Token von Claude Code gilt etwa 8 Stunden. Es wird nur erneuert,

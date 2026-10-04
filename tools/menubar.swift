@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import Foundation
 import UserNotifications
 
@@ -17,6 +18,8 @@ let weekdaysFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/ClaudeCounter/weekdays")
 let dayhoursFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/ClaudeCounter/dayhours")
+let preferredOutputFile = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/ClaudeCounter/preferred-output")
 let defaultBrightness = 50
 let minutesPerDay = 24 * 60
 let weekdayNames = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
@@ -97,6 +100,102 @@ func spokenHours(_ hours: HourWindow) -> String {
     if hours == wholeDay { return "ganzer Tag" }
     if hours.shuts == minutesPerDay { return "ab \(spelledClock(hours.opens))" }
     return "\(spelledClock(hours.opens))\u{2013}\(spelledClock(hours.shuts))"
+}
+
+struct AudioOutput {
+    let identifier: String
+    let name: String
+}
+
+func audioAddress(
+    _ selector: AudioObjectPropertySelector,
+    _ scope: AudioObjectPropertyScope = AudioObjectPropertyScope(kAudioObjectPropertyScopeGlobal)
+) -> AudioObjectPropertyAddress {
+    return AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: scope,
+        mElement: AudioObjectPropertyElement(kAudioObjectPropertyElementMain)
+    )
+}
+
+func audioText(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String {
+    var address = audioAddress(selector)
+    var value: CFString = "" as CFString
+    var size = UInt32(MemoryLayout<CFString>.size)
+    let status = withUnsafeMutablePointer(to: &value) { pointer -> OSStatus in
+        return AudioObjectGetPropertyData(device, &address, 0, nil, &size, pointer)
+    }
+    return status == noErr ? value as String : ""
+}
+
+func carriesOutputChannels(_ device: AudioObjectID) -> Bool {
+    var address = audioAddress(
+        kAudioDevicePropertyStreamConfiguration,
+        AudioObjectPropertyScope(kAudioObjectPropertyScopeOutput)
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr, size > 0 else {
+        return false
+    }
+    let storage = UnsafeMutableRawPointer.allocate(
+        byteCount: Int(size),
+        alignment: MemoryLayout<AudioBufferList>.alignment
+    )
+    defer { storage.deallocate() }
+    guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, storage) == noErr else {
+        return false
+    }
+    let buffers = UnsafeMutableAudioBufferListPointer(
+        storage.assumingMemoryBound(to: AudioBufferList.self)
+    )
+    return buffers.reduce(0) { $0 + Int($1.mNumberChannels) } > 0
+}
+
+func audioOutputs() -> [AudioOutput] {
+    var address = audioAddress(kAudioHardwarePropertyDevices)
+    var size: UInt32 = 0
+    let system = AudioObjectID(kAudioObjectSystemObject)
+    guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr, size > 0 else {
+        return []
+    }
+    var devices = [AudioObjectID](
+        repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size
+    )
+    guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &devices) == noErr else {
+        return []
+    }
+    return devices.filter(carriesOutputChannels).map {
+        AudioOutput(
+            identifier: audioText($0, kAudioDevicePropertyDeviceUID),
+            name: audioText($0, kAudioObjectPropertyName)
+        )
+    }.filter { !$0.identifier.isEmpty && !$0.name.isEmpty }
+}
+
+func preferredOutput() -> String? {
+    guard let stored = try? String(contentsOf: preferredOutputFile, encoding: .utf8) else {
+        return nil
+    }
+    let wanted = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+    return wanted.isEmpty ? nil : wanted
+}
+
+func writePreferredOutput(_ identifier: String?) {
+    guard let identifier = identifier else {
+        try? FileManager.default.removeItem(at: preferredOutputFile)
+        return
+    }
+    try? FileManager.default.createDirectory(
+        at: preferredOutputFile.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try? identifier.write(to: preferredOutputFile, atomically: true, encoding: .utf8)
+}
+
+func spokenPreferredOutput(_ outputs: [AudioOutput]) -> String {
+    guard let wanted = preferredOutput() else { return "zuletzt benutztes" }
+    if let found = outputs.first(where: { $0.identifier == wanted }) { return found.name }
+    return "nicht angeschlossen"
 }
 
 func wantedBrightness() -> Int {
@@ -736,6 +835,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(switchRow(
             "Tonschutz", "speaker.slash", audioGuardRuns, #selector(audioGuardSwitched(_:))
         ))
+        menu.addItem(outputChoice())
         menu.addItem(brightnessRow())
         if !counterRuns {
             menu.addItem(note("Helligkeit wirkt, sobald der Z\u{e4}hler l\u{e4}uft", nil))
@@ -970,6 +1070,48 @@ final class MenuController: NSObject, NSMenuDelegate {
         let entry = NSMenuItem()
         entry.view = row
         return entry
+    }
+
+    private func outputChoice() -> NSMenuItem {
+        let outputs = audioOutputs()
+        let wanted = preferredOutput()
+        let devices = NSMenu()
+        devices.autoenablesItems = false
+
+        let lastUsed = NSMenuItem(
+            title: "zuletzt benutztes",
+            action: #selector(pickOutput(_:)),
+            keyEquivalent: ""
+        )
+        lastUsed.target = self
+        lastUsed.state = wanted == nil ? .on : .off
+        devices.addItem(lastUsed)
+        devices.addItem(.separator())
+
+        for output in outputs {
+            let entry = NSMenuItem(
+                title: output.name,
+                action: #selector(pickOutput(_:)),
+                keyEquivalent: ""
+            )
+            entry.target = self
+            entry.representedObject = output.identifier
+            entry.state = output.identifier == wanted ? .on : .off
+            devices.addItem(entry)
+        }
+
+        let entry = NSMenuItem(
+            title: "Ton zur\u{fc}ck auf: \(spokenPreferredOutput(outputs))",
+            action: nil,
+            keyEquivalent: ""
+        )
+        entry.image = symbolImage("speaker.wave.2", 13)
+        entry.submenu = devices
+        return entry
+    }
+
+    @objc private func pickOutput(_ sender: NSMenuItem) {
+        writePreferredOutput(sender.representedObject as? String)
     }
 
     private func hourChoice() -> NSMenuItem {

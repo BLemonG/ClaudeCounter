@@ -8,6 +8,7 @@ struct GuardedDirection {
     let scope: AudioObjectPropertyScope
     let selectors: [AudioObjectPropertySelector]
     let rememberedFileName: String
+    let preferredFileName: String
     let preferredTransports: [UInt32]
 }
 
@@ -20,6 +21,7 @@ let guardedDirections = [
             kAudioHardwarePropertyDefaultSystemOutputDevice,
         ],
         rememberedFileName: "last-good-output",
+        preferredFileName: "preferred-output",
         preferredTransports: [
             kAudioDeviceTransportTypeBluetooth,
             kAudioDeviceTransportTypeBluetoothLE,
@@ -31,6 +33,7 @@ let guardedDirections = [
         scope: AudioObjectPropertyScope(kAudioObjectPropertyScopeInput),
         selectors: [kAudioHardwarePropertyDefaultInputDevice],
         rememberedFileName: "last-good-input",
+        preferredFileName: "preferred-input",
         preferredTransports: [
             kAudioDeviceTransportTypeBuiltIn,
             kAudioDeviceTransportTypeBluetooth,
@@ -151,6 +154,7 @@ final class DirectionGuard {
     private let direction: GuardedDirection
     private let unwantedFragment: String
     private let rememberedPath: URL
+    private let preferredPath: URL
     private var rememberedUniqueIdentifier: String?
     private let queue: DispatchQueue
 
@@ -158,6 +162,7 @@ final class DirectionGuard {
         self.direction = direction
         self.unwantedFragment = unwantedFragment.lowercased()
         self.rememberedPath = stateDirectory.appendingPathComponent(direction.rememberedFileName)
+        self.preferredPath = stateDirectory.appendingPathComponent(direction.preferredFileName)
         self.queue = DispatchQueue(label: "local.claudecounter.audioguard.\(direction.label)")
         let stored = try? String(contentsOf: rememberedPath, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -176,9 +181,21 @@ final class DirectionGuard {
         try? identifier.write(to: rememberedPath, atomically: true, encoding: .utf8)
     }
 
+    private func preferredUniqueIdentifier() -> String? {
+        let stored = try? String(contentsOf: preferredPath, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (stored?.isEmpty == false) ? stored : nil
+    }
+
     private func replacement() -> AudioObjectID? {
         let candidates = devicesCarrying(direction.scope).filter { !isUnwanted($0) }
         guard !candidates.isEmpty else { return nil }
+        if let wanted = preferredUniqueIdentifier() {
+            if let pinned = candidates.first(where: { deviceUniqueIdentifier($0) == wanted }) {
+                return pinned
+            }
+            note("the chosen \(direction.label) device is not here, falling back")
+        }
         if let identifier = rememberedUniqueIdentifier,
            let stored = candidates.first(where: { deviceUniqueIdentifier($0) == identifier }) {
             return stored
