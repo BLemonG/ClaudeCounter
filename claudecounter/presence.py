@@ -7,7 +7,9 @@ from typing import Optional
 FRONTMOST_COMMAND = ("lsappinfo", "front")
 BUNDLE_ID_COMMAND = ("lsappinfo", "info", "-only", "bundleid")
 IDLE_COMMAND = ("ioreg", "-c", "IOHIDSystem", "-d", "4")
-BUNDLE_ID_PATTERN = re.compile(r'"CFBundleIdentifier"\s*=\s*"([^"]+)"')
+BUNDLE_ID_PATTERN = re.compile(
+    r'(?:"CFBundleIdentifier"|\bbundleID)\s*=\s*"([^"]+)"'
+)
 IDLE_PATTERN = re.compile(r'"HIDIdleTime"\s*=\s*(\d+)')
 NANOSECONDS_PER_SECOND = 1_000_000_000.0
 COMMAND_TIMEOUT = 2.0
@@ -26,6 +28,14 @@ def run(command) -> Optional[str]:
     return finished.stdout
 
 
+def bundle_id_from(described: str) -> Optional[str]:
+    match = BUNDLE_ID_PATTERN.search(described or "")
+    if match is None:
+        return None
+    found = match.group(1).strip()
+    return found or None
+
+
 def frontmost_bundle_id() -> Optional[str]:
     handle = run(FRONTMOST_COMMAND)
     if not handle or not handle.strip():
@@ -33,8 +43,7 @@ def frontmost_bundle_id() -> Optional[str]:
     described = run(BUNDLE_ID_COMMAND + (handle.strip(),))
     if not described:
         return None
-    match = BUNDLE_ID_PATTERN.search(described)
-    return match.group(1) if match else None
+    return bundle_id_from(described)
 
 
 def seconds_since_input() -> Optional[float]:

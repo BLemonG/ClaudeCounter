@@ -380,6 +380,22 @@ nimmt der Tonschutz wie bisher das zuletzt benutzte. Dasselbe geht für die
 Eingabe über die Datei `preferred-input`; das Menü bietet nur die Ausgabe an,
 weil die Eingabe selten stört.
 
+**Der orange Hintergrund atmet, obwohl nichts wartet**
+Eine wartende Sitzung wird gelöscht, sobald du am Rechner sitzt und die App
+vorn hast, in der sie läuft. Dafür merkt sich der Hook beim Absenden einer
+Eingabe die vordere App über `lsappinfo`. Liefert das keine Kennung, bleibt
+die Markierung liegen, bis sie nach 15 Minuten von selbst verfällt — so lange
+atmet das Display. Prüfen lässt sich das mit:
+
+```bash
+python3 -c "from claudecounter import presence; print(presence.frontmost_bundle_id())"
+```
+
+Kommt dabei `None` heraus, findet der Hook die vordere App nicht. Liegen
+gebliebene Markierungen stehen in
+`~/Library/Application Support/ClaudeCounter/waiting/`; die Dateien dort
+dürfen jederzeit gelöscht werden.
+
 **„the Claude Code access token expired"**
 Das Access-Token von Claude Code gilt etwa 8 Stunden. Es wird nur erneuert,
 wenn die CLI wirklich eine Anfrage stellt — `claude auth status` genügt dafür
