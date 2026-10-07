@@ -116,7 +116,8 @@ def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
           a_session_is_waiting=lambda: False, refresh=None,
           minimum_fetch_spacing: float = MINIMUM_FETCH_SPACING_SECONDS,
           renew_sign_in=lambda: None,
-          sign_in_renewal_spacing: float = SIGN_IN_RENEWAL_SPACING_SECONDS) -> Daemon:
+          sign_in_renewal_spacing: float = SIGN_IN_RENEWAL_SPACING_SECONDS,
+          target=TARGET) -> Daemon:
     pending = refresh if refresh is not None else {"asked": False}
 
     def refresh_requested() -> bool:
@@ -128,7 +129,7 @@ def build(read_usage, display, clock, usage_fetch_interval: float = 0.0,
         return asked
 
     return Daemon(
-        TARGET,
+        target,
         quiet_logger(),
         published_state_path=scratch_state_path(),
         brightness_path=scratch_brightness_path(),
@@ -1124,6 +1125,48 @@ def a_crashing_renewal_is_treated_as_not_renewed() -> None:
           "without any reading the display still states that it has no data")
 
 
+
+
+def without_a_device_the_numbers_still_reach_the_menu() -> None:
+    print("no display configured")
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(lambda: snapshot(64.0, 7.0), display, clock, target=None)
+    delivered = daemon.tick()
+    check(delivered, "the tick counts as done")
+    check(not display.sent, "nothing is sent over bluetooth")
+    published = json.loads(daemon.published_state_path.read_text())
+    check(published["session_pct"] == 64.0, "the menu still gets the session value")
+    check(published["weekly_pct"] == 7.0, "and the weekly value")
+    check(published["stale"] is False, "and the freshness")
+
+
+def without_a_device_a_waiting_session_is_still_noticed() -> None:
+    print("no display, waiting session")
+    display, clock = FakeDisplay(), FakeClock()
+    daemon = build(
+        lambda: snapshot(12.0, 3.0), display, clock,
+        a_session_is_waiting=lambda: True, target=None
+    )
+    check(daemon.tick(), "the tick counts as done")
+    check(not display.sent, "and still nothing is sent")
+    check(daemon.attention_is_wanted(), "the waiting session is seen")
+
+
+def the_log_says_whether_a_display_is_in_play() -> None:
+    print("the starting line")
+    display, clock = FakeDisplay(), FakeClock()
+    withDevice = build(lambda: snapshot(1.0, 1.0), display, clock)
+    without = build(lambda: snapshot(1.0, 1.0), display, clock, target=None)
+    check(
+        "AA:BB:CC:DD:EE:FF" in withDevice.spoken_target(),
+        "a device is named with its address",
+    )
+    check(
+        "no display" in without.spoken_target(),
+        "and without one the log says so",
+    )
+
+
 def main() -> int:
     a_good_reading_reaches_the_display()
     an_unchanged_frame_is_not_resent()
@@ -1150,6 +1193,9 @@ def main() -> int:
     a_restart_keeps_the_last_known_reading()
     the_weekday_setting_reaches_the_marker()
     the_day_hours_setting_reaches_the_marker()
+    without_a_device_the_numbers_still_reach_the_menu()
+    without_a_device_a_waiting_session_is_still_noticed()
+    the_log_says_whether_a_display_is_in_play()
     an_expired_sign_in_is_renewed_through_claude_code()
     a_failed_renewal_keeps_the_last_reading_and_waits()
     a_crashing_renewal_is_treated_as_not_renewed()

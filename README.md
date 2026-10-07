@@ -41,6 +41,7 @@ Es wird **nie** 0 % angezeigt, wenn in Wahrheit nur die Datenquelle fehlt.
 * Python 3.11 oder neuer mit [Pillow](https://pypi.org/project/Pillow/)
 * Xcode-Kommandozeilenwerkzeuge (für den Bluetooth-Helfer)
 * Eine Divoom Timebox Evo, **mit dem Mac gekoppelt** (normale Audio-Kopplung genügt)
+  — optional, siehe [Ohne Display](#ohne-display)
 * Ein Claude-Konto mit aktiver Pro- oder Max-Subscription
 
 ## Einrichtung
@@ -58,29 +59,22 @@ python3 -m pip install -r requirements.txt
 tools/build_native.sh
 ```
 
-**2. Gerät finden.** Die Timebox muss vorher in den Systemeinstellungen
-gekoppelt sein.
-
-```bash
-python3 -m claudecounter list-devices
-```
-
-**3. Gerät eintragen.** Der SPP-Kanal ist bei der Evo in aller Regel 1;
-`configure` prüft ihn per SDP-Abfrage nach.
-
-```bash
-python3 -m claudecounter configure --mac AA:BB:CC:DD:EE:FF
-```
-
-**4. Testbild senden.** Beim allerersten Aufruf fragt macOS nach der
+**2. Gerät wählen.** Der Dialog zeigt die gekoppelten Bluetooth-Geräte,
+prüft den SPP-Kanal per SDP-Abfrage, schickt ein Testbild und fragt, ob es
+angekommen ist. Zur Auswahl steht auch **„no display, only the menu bar"** —
+siehe [Ohne Display](#ohne-display). Beim ersten Senden fragt macOS nach der
 Bluetooth-Berechtigung.
 
 ```bash
-python3 -m claudecounter send --session 42 --weekly 17
+python3 -m claudecounter setup
 ```
 
-**5. Als Dienst installieren.** Startet bei der Anmeldung und zusätzlich,
-sobald du Claude öffnest.
+Wer lieber von Hand einträgt, nimmt weiterhin `list-devices` und
+`configure --mac AA:BB:CC:DD:EE:FF`.
+
+**3. Als Dienst installieren.** Startet bei der Anmeldung und zusätzlich,
+sobald du Claude öffnest. Ist noch nichts eingerichtet, ruft `install.sh`
+den Dialog aus Schritt 2 selbst auf.
 
 ```bash
 tools/install.sh
@@ -91,6 +85,26 @@ Wieder entfernen:
 ```bash
 tools/uninstall.sh
 ```
+
+## Ohne Display
+
+ClaudeCounter läuft auch ohne Timebox. Wer im Dialog aus Schritt 2
+**„no display, only the menu bar"** wählt, bekommt dieselben Zahlen in der
+Menüleiste: die zwei Ringe für Sitzung und Woche, den blauen Punkt, die
+Erneuerung der Anmeldung und den Sitzungsstart am Morgen. Der Zähler holt die
+Werte weiter im Minutentakt und schreibt sie nach `state.json`, er zeichnet
+nur nichts mehr.
+
+```bash
+python3 -m claudecounter setup      # dort den letzten Punkt wählen
+tools/install.sh
+```
+
+Es fehlen dann naturgemäß das Display selbst, der Tonschutz und der
+Helligkeitsregler; das Menü blendet beide aus. Es braucht weder eine Timebox
+noch eine Bluetooth-Berechtigung. Die Wahl steht in `config.json` als
+`{"display": false}` und lässt sich jederzeit mit einem erneuten `setup`
+umstellen.
 
 ## Ohne Terminal starten
 
@@ -474,6 +488,7 @@ claudecounter/
   usage_source.py  Token, Endpunkt, lokale Datei, Fehlerklassen
   signin.py        lässt Claude Code eine abgelaufene Anmeldung erneuern
   sessionstart.py  eröffnet werktags früh das 5-Stunden-Fenster
+  setup.py         fragt beim ersten Mal nach dem Display, oder nach keinem
   attention.py     Markierungen wartender Sitzungen
   presence.py      vorderste App und Zeit seit der letzten Eingabe
   weekdays.py      welche Wochentage der Wochenpunkt zählt
