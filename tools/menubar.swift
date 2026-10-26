@@ -20,20 +20,10 @@ let dayhoursFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/ClaudeCounter/dayhours")
 let preferredOutputFile = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/ClaudeCounter/preferred-output")
-let configFile = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Library/Application Support/ClaudeCounter/config.json")
 let defaultBrightness = 50
 let minutesPerDay = 24 * 60
 let weekdayNames = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 let everyDay: Set<Int> = Set(0...6)
-
-func displayIsConfigured() -> Bool {
-    guard let data = try? Data(contentsOf: configFile),
-          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let address = root["mac"] as? String
-    else { return false }
-    return !address.isEmpty
-}
 
 func activeDays() -> Set<Int> {
     guard let text = try? String(contentsOf: weekdaysFile, encoding: .utf8) else { return everyDay }
@@ -292,6 +282,8 @@ struct PublishedState {
     let reading: Reading?
     let trouble: String?
     let troubleReason: String?
+    let displayCanDim: Bool
+    let displayTakesTheAudio: Bool
 }
 
 func publishedState() -> PublishedState? {
@@ -312,7 +304,9 @@ func publishedState() -> PublishedState? {
     return PublishedState(
         reading: reading,
         trouble: root["trouble"] as? String,
-        troubleReason: root["trouble_reason"] as? String
+        troubleReason: root["trouble_reason"] as? String,
+        displayCanDim: (root["display_brightness"] as? Bool) ?? false,
+        displayTakesTheAudio: (root["display_audio_guard"] as? Bool) ?? false
     )
 }
 
@@ -842,11 +836,13 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(switchRow(
             "Z\u{e4}hler", "timer", counterRuns, #selector(counterSwitched(_:))
         ))
-        if displayIsConfigured() {
+        if state?.displayTakesTheAudio == true {
             menu.addItem(switchRow(
                 "Tonschutz", "speaker.slash", audioGuardRuns, #selector(audioGuardSwitched(_:))
             ))
             menu.addItem(outputChoice())
+        }
+        if state?.displayCanDim == true {
             menu.addItem(brightnessRow())
             if !counterRuns {
                 menu.addItem(note("Helligkeit wirkt, sobald der Z\u{e4}hler l\u{e4}uft", nil))

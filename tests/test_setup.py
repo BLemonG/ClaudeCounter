@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pathlib import Path
 
-from claudecounter import config, setup, transport
+from claudecounter import config, setup
+from claudecounter.displays import Candidate, Device
 
 FAILURES = []
 
@@ -46,7 +47,7 @@ class Recorder:
         self.declined = False
         self.shown = []
 
-    def save_device(self, device):
+    def save(self, device):
         self.saved = device
         return Path("/tmp/config.json")
 
@@ -55,18 +56,36 @@ class Recorder:
         return Path("/tmp/config.json")
 
 
-ONE_DEVICE = [("AA:BB:CC:DD:EE:FF", "TimeBox Evo")]
+ONE_DEVICE = [
+    Candidate(
+        kind="timebox-evo",
+        name="TimeBox Evo",
+        how="Bluetooth",
+        settings={"mac": "AA:BB:CC:DD:EE:FF"},
+    )
+]
+
+OTHER_KIND = Candidate(
+    kind="fan-lcd", name="UNI FAN TL LCD", how="USB", settings={"serial": "7393"}
+)
 
 
-def wizard(dialogue, recorder, devices=ONE_DEVICE, channel=1, arrives=True,
+def wizard(dialogue, recorder, candidates=None, channel=1, arrives=True,
            at_a_terminal=True):
+    offered = ONE_DEVICE if candidates is None else candidates
+
+    def prepare(candidate):
+        if channel is None:
+            return None, "exposes no serial port service, it cannot show the numbers"
+        return dict(candidate.settings, channel=channel), None
+
     return setup.run_setup(
         say=dialogue.say,
         ask=dialogue.ask,
-        list_devices=lambda: devices,
-        probe_channel=lambda mac: channel,
-        show_test_image=lambda mac, channel: arrives,
-        save_device=recorder.save_device,
+        gather=lambda: offered,
+        prepare=prepare,
+        show_test_image=lambda kind, settings: arrives,
+        save=recorder.save,
         decline_display=recorder.decline_display,
         at_a_terminal=at_a_terminal,
     )
@@ -79,11 +98,16 @@ def a_chosen_device_is_stored() -> None:
     check(code == 0, "the wizard finishes")
     check(recorder.saved is not None, "the device is stored")
     check(
-        recorder.saved is not None and recorder.saved.mac == "AA:BB:CC:DD:EE:FF",
-        "with the chosen address",
+        recorder.saved is not None and recorder.saved.kind == "timebox-evo",
+        "with the kind of device it is",
     )
     check(
-        recorder.saved is not None and recorder.saved.channel == 1,
+        recorder.saved is not None
+        and recorder.saved.settings["mac"] == "AA:BB:CC:DD:EE:FF",
+        "the chosen address",
+    )
+    check(
+        recorder.saved is not None and recorder.saved.settings["channel"] == 1,
         "and the probed channel",
     )
     check(not recorder.declined, "and the display is not declined")
@@ -126,25 +150,35 @@ def unreadable_answers_are_asked_again() -> None:
     check(len(dialogue.asked) == 3, "every unreadable answer is asked again")
 
 
-def bluetooth_trouble_still_allows_the_menu_bar() -> None:
-    print("bluetooth trouble")
+def a_search_that_fails_still_allows_the_menu_bar() -> None:
+    print("the search for displays fails")
 
-    def no_bluetooth():
-        raise transport.TransportError("bluetooth helper missing")
+    def no_search():
+        raise RuntimeError("bluetooth helper missing")
 
     dialogue, recorder = Dialogue(["1"]), Recorder()
     code = setup.run_setup(
         say=dialogue.say,
         ask=dialogue.ask,
-        list_devices=no_bluetooth,
-        probe_channel=lambda mac: 1,
-        show_test_image=lambda mac, channel: True,
-        save_device=recorder.save_device,
+        gather=no_search,
+        save=recorder.save,
         decline_display=recorder.decline_display,
         at_a_terminal=True,
     )
     check(code == 0, "the wizard finishes")
     check(recorder.declined, "the menu bar is still on offer")
+
+
+def several_kinds_stand_side_by_side() -> None:
+    print("more than one kind of display")
+    dialogue, recorder = Dialogue(["2", "y"]), Recorder()
+    code = wizard(dialogue, recorder, candidates=ONE_DEVICE + [OTHER_KIND])
+    check(code == 0, "the wizard finishes")
+    check(
+        recorder.saved is not None and recorder.saved.kind == "fan-lcd",
+        "the second kind can be chosen",
+    )
+    check("usb" in dialogue.spoken(), "and the list says how each one is reached")
 
 
 def without_a_terminal_nothing_changes() -> None:
@@ -168,7 +202,9 @@ def the_declined_display_survives_a_restart() -> None:
             check(config.display_was_declined(), "the declined display is remembered")
             check(config.setup_was_done(), "and counts as a finished setup")
             check(config.load_config() is None, "and leaves no device behind")
-            config.save_config(config.DeviceConfig(mac="AA:BB:CC:DD:EE:FF", channel=1))
+            config.save_device(
+                Device(kind="timebox-evo", settings={"mac": "AA:BB:CC:DD:EE:FF"})
+            )
             check(not config.display_was_declined(), "a device overrules it")
             check(config.setup_was_done(), "and counts as a finished setup too")
         finally:
@@ -181,7 +217,8 @@ def main() -> int:
     a_test_image_that_never_arrives_asks_again()
     a_device_without_a_serial_port_is_refused()
     unreadable_answers_are_asked_again()
-    bluetooth_trouble_still_allows_the_menu_bar()
+    a_search_that_fails_still_allows_the_menu_bar()
+    several_kinds_stand_side_by_side()
     without_a_terminal_nothing_changes()
     the_declined_display_survives_a_restart()
     if FAILURES:

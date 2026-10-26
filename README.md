@@ -106,6 +106,42 @@ noch eine Bluetooth-Berechtigung. Die Wahl steht in `config.json` als
 `{"display": false}` und lässt sich jederzeit mit einem erneuten `setup`
 umstellen.
 
+## Eine weitere Geräteart einbauen
+
+Der Dialog aus Schritt 2 fragt jede bekannte Geräteart, welche Geräte sie
+gerade findet, und zeigt alles in einer Liste. Was in `config.json` landet,
+sieht so aus:
+
+```json
+{ "kind": "timebox-evo", "settings": { "mac": "AA:BB:CC:DD:EE:FF", "channel": 1 } }
+```
+
+Ältere Dateien ohne `kind` gelten als Timebox, `{"display": false}` heißt
+weiterhin „kein Gerät". Niemand muss etwas umziehen.
+
+Eine neue Art ist eine Datei in `claudecounter/displays/` mit:
+
+| Name | Aufgabe |
+| --- | --- |
+| `KIND`, `NAME`, `HOW` | Kennung, Klartextname, wie das Gerät hängt („USB") |
+| `SUPPORTS_BRIGHTNESS`, `STEALS_AUDIO` | was die Art kann und anrichtet |
+| `candidates()` | welche Geräte dieser Art gerade da sind |
+| `prepare(settings)` | fehlende Angaben ergänzen oder den Grund nennen |
+| `show_test_image(settings)` | das Testbild für den Dialog |
+| `Driver` | `frames_for`, `brightness_payload`, `send`, `spoken` |
+
+Dazu ein Eintrag in `registry.MODULES`, und der Dialog bietet sie an. Der
+Daemon kennt keine Gerätedetails mehr: er holt die Zahlen, fragt den Treiber
+nach fertigen Paketen und schickt sie los. Das Zeichnen gehört zur Art, weil
+ein 16×16-Raster und ein 400×400-LCD nichts teilen außer dem Messwert.
+
+Die beiden Fähigkeiten stehen auch in `state.json`, damit das Menü weiß, ob
+es Helligkeit und Tonschutz anbieten soll — ohne selbst Gerätearten zu kennen.
+
+Gleichzeitig bedient ein Mac immer nur ein Display. Mehrere nebeneinander
+wären eine Liste in `config.json` und eine Mehrfachauswahl im Dialog; der
+Treiberschnitt bliebe wie er ist.
+
 ## Ohne Terminal starten
 
 Nach `tools/install.sh` läuft alles von selbst: drei launchd-Dienste starten bei
@@ -489,6 +525,10 @@ claudecounter/
   signin.py        lässt Claude Code eine abgelaufene Anmeldung erneuern
   sessionstart.py  eröffnet werktags früh das 5-Stunden-Fenster
   setup.py         fragt beim ersten Mal nach dem Display, oder nach keinem
+  displays/
+    __init__.py    Gerät und Kandidat, die beiden gemeinsamen Formen
+    registry.py    welche Gerätearten es gibt und was sie können
+    timebox.py     die Divoom Timebox Evo: suchen, zeichnen, senden
   attention.py     Markierungen wartender Sitzungen
   presence.py      vorderste App und Zeit seit der letzten Eingabe
   weekdays.py      welche Wochentage der Wochenpunkt zählt

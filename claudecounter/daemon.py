@@ -16,7 +16,7 @@ from . import transport
 from . import signin
 from . import usage_source
 from . import dayhours, weekdays
-from .config import DeviceConfig
+from .displays import Device, registry
 from .snapshot import UsageSnapshot, utc_now_iso
 
 POLL_INTERVAL_SECONDS = 60.0
@@ -67,7 +67,7 @@ def build_logger(verbose: bool = False) -> logging.Logger:
 class Daemon:
     def __init__(
         self,
-        target: Optional[DeviceConfig],
+        device: Optional[Device],
         logger: logging.Logger,
         poll_interval: float = POLL_INTERVAL_SECONDS,
         usage_fetch_interval: float = USAGE_FETCH_INTERVAL_SECONDS,
@@ -87,9 +87,14 @@ class Daemon:
         refresh_requested=attention.refresh_requested,
         consume_refresh=attention.consume_refresh,
         send_packets=transport.send_packets,
+        driver=None,
         clock=None,
     ) -> None:
-        self.target = target
+        self.device = device
+        self.driver = (
+            driver if driver is not None
+            else registry.driver_for(device, send_packets=send_packets)
+        )
         self.logger = logger
         self.poll_interval = poll_interval
         self.usage_fetch_interval = usage_fetch_interval
@@ -328,43 +333,18 @@ class Daemon:
         except Exception:
             return False
 
-    def frames_to_send(
-        self,
-        snapshot: Optional[UsageSnapshot],
-        waiting: bool,
-        active_days=None,
-        active_hours=None,
-    ):
-        if snapshot is None:
-            description = "no usage data, showing the unavailable frame"
-            if waiting:
-                return protocol.animation_packets(
-                    renderer.breathing_unavailable_frames()
-                ), description + ", breathing"
-            return [protocol.image_packet(renderer.render_unavailable())], description
-        description = "session %.1f%% weekly %.1f%%%s" % (
-            snapshot.session_pct,
-            snapshot.weekly_pct,
-            " (stale)" if snapshot.stale else "",
-        )
-        if waiting:
-            return protocol.animation_packets(
-                renderer.breathing_frames(
-                    snapshot, active_days=active_days, active_hours=active_hours
-                )
-            ), description + ", a session is waiting for input"
-        return [
-            protocol.image_packet(
-                renderer.render(
-                    snapshot, active_days=active_days, active_hours=active_hours
-                )
-            )
-        ], description
+    def display_can_dim(self) -> bool:
+        return self.driver is not None and registry.supports_brightness(self.device)
+
+    def display_takes_the_audio(self) -> bool:
+        return self.driver is not None and registry.steals_audio(self.device)
 
     def publish_snapshot(self, snapshot: Optional[UsageSnapshot]) -> None:
         try:
             self.published_state_path.parent.mkdir(parents=True, exist_ok=True)
             published = dict(snapshot.to_dict()) if snapshot is not None else {}
+            published["display_brightness"] = self.display_can_dim()
+            published["display_audio_guard"] = self.display_takes_the_audio()
             published["trouble"] = self.last_trouble
             published["trouble_reason"] = self.last_trouble_reason
             published["written_at"] = utc_now_iso()
@@ -377,15 +357,15 @@ class Daemon:
             self.logger.debug("could not publish the current reading")
 
     def spoken_target(self) -> str:
-        if self.target is None:
+        if self.driver is None:
             return "no display, the menu bar reads the numbers"
-        return f"target {self.target.mac} channel {self.target.channel}"
+        return f"{registry.spoken_name(self.device)}, {self.driver.spoken()}"
 
     def tick(self) -> bool:
         snapshot = self.current_snapshot()
         self.publish_snapshot(snapshot)
         waiting = self.attention_is_wanted()
-        if self.target is None:
+        if self.driver is None:
             return True
         active_days = self.wanted_active_days()
         if self.drawn_active_days is not None and active_days != self.drawn_active_days:
@@ -403,14 +383,14 @@ class Daemon:
                 dayhours.spelled(active_hours),
             )
         self.drawn_active_hours = active_hours
-        frames, description = self.frames_to_send(
+        frames, description = self.driver.frames_for(
             snapshot, waiting, active_days, active_hours
         )
 
-        wanted = self.wanted_brightness()
+        wanted = self.wanted_brightness() if self.display_can_dim() else None
         turning_the_lamp = wanted is not None and wanted != self.applied_brightness
         if turning_the_lamp:
-            payloads = [protocol.brightness_packet(wanted)] + frames
+            payloads = [self.driver.brightness_payload(wanted)] + frames
             description += f", brightness {wanted}"
         elif self.payloads_are_due(frames):
             payloads = frames
@@ -419,7 +399,7 @@ class Daemon:
             return True
 
         try:
-            written = self.send_packets(self.target.mac, self.target.channel, payloads)
+            written = self.driver.send(payloads)
         except transport.TransportError as failure:
             self.logger.warning("could not reach the display: %s", failure)
             return False
@@ -495,10 +475,10 @@ class Daemon:
         return 0
 
 
-def run_daemon(target: Optional[DeviceConfig], poll_interval: float = POLL_INTERVAL_SECONDS,
+def run_daemon(device: Optional[Device], poll_interval: float = POLL_INTERVAL_SECONDS,
                verbose: bool = False) -> int:
     logger = build_logger(verbose=verbose)
-    daemon = Daemon(target, logger, poll_interval=poll_interval)
+    daemon = Daemon(device, logger, poll_interval=poll_interval)
     for received in (signal.SIGINT, signal.SIGTERM):
         signal.signal(received, daemon.request_stop)
     return daemon.run()

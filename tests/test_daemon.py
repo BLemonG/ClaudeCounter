@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from claudecounter import protocol, transport, usage_source
 from claudecounter import dayhours, weekdays
 from claudecounter import render as renderer
-from claudecounter.config import DeviceConfig
+from claudecounter.displays import Device
 from claudecounter.daemon import (
     Daemon,
     FORCED_RESEND_SECONDS,
@@ -27,7 +27,7 @@ from pathlib import Path
 
 FAILURES = []
 
-TARGET = DeviceConfig(mac="AA:BB:CC:DD:EE:FF", channel=1)
+TARGET = Device(kind="timebox-evo", settings={"mac": "AA:BB:CC:DD:EE:FF", "channel": 1})
 
 SCRATCH = tempfile.TemporaryDirectory()
 

@@ -14,12 +14,15 @@ from . import daemon as daemon_module
 from . import usage_source
 from . import dayhours, sessionstart, setup, weekdays
 from .config import (
+    DEFAULT_KIND,
     DEFAULT_RFCOMM_CHANNEL,
     DeviceConfig,
     display_was_declined,
     load_config,
+    load_device,
     save_config,
 )
+from .displays import Device
 from .snapshot import UsageSnapshot, utc_now_iso
 
 MINIMUM_PREVIEW_SCALE = 16
@@ -325,19 +328,20 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    if getattr(args, "mac", None) or load_config() is not None:
+    if getattr(args, "mac", None):
         target = resolve_target(args)
         if target is None:
             return 1
-    elif display_was_declined():
-        target = None
+        device = Device(kind=DEFAULT_KIND, settings=target.to_dict())
     else:
-        print("nothing configured yet, run: claudecounter setup", file=sys.stderr)
-        return 1
+        device = load_device()
+        if device is None and not display_was_declined():
+            print("nothing configured yet, run: claudecounter setup", file=sys.stderr)
+            return 1
     if args.once:
         logger = daemon_module.build_logger(verbose=args.verbose)
-        return 0 if daemon_module.Daemon(target, logger).tick() else 1
-    return daemon_module.run_daemon(target, poll_interval=args.interval, verbose=args.verbose)
+        return 0 if daemon_module.Daemon(device, logger).tick() else 1
+    return daemon_module.run_daemon(device, poll_interval=args.interval, verbose=args.verbose)
 
 
 def add_target_arguments(parser: argparse.ArgumentParser) -> None:
